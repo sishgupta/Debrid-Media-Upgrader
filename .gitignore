@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+media_library.json
+settings.json
+aiostreams_cache.json
+mock_media/
