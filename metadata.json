@@ -1,0 +1,6 @@
+{
+  "name": "Debrid Media Upgrader",
+  "description": "Upgrade your media library by finding and downloading higher quality versions via Debrid services.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

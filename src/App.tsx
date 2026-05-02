@@ -1,0 +1,1036 @@
+import React, { useState, useEffect } from 'react';
+import { Search, RefreshCw, Download, Trash2, Edit2, Play, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw } from 'lucide-react';
+import axios from 'axios';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+import * as Slider from '@radix-ui/react-slider';
+import StreamSelectorModal from './components/StreamSelectorModal';
+
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+interface Movie {
+  id: number;
+  filePath: string;
+  fileName: string;
+  movieName: string;
+  year: string;
+  fileSize: number;
+  resolution: string;
+  bitrate: number;
+  hdr: boolean;
+  ext: string;
+  magnetLink: string | null;
+  status: string;
+  imdbId: string | null;
+  tmdbTitle?: string;
+  progress?: number;
+  oldFilePath?: string;
+  oldMeta?: {
+    resolution: string;
+    bitrate: number;
+    fileSize: number;
+    hdr: boolean;
+  };
+  upgradeMeta?: {
+    res: string;
+    sizeGiB: number;
+    bitrateMbps: number;
+    video: string;
+    streamName?: string;
+    filename?: string;
+    extension?: string;
+  };
+}
+
+export default function App() {
+  const [movies, setMovies] = useState<Movie[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [maxResFilter, setMaxResFilter] = useState('');
+  const [maxBitrateFilter, setMaxBitrateFilter] = useState('');
+  const [extFilter, setExtFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+
+  const [sortConfig, setSortConfig] = useState<{ key: keyof Movie | null, direction: 'asc' | 'desc' }>({ key: null, direction: 'asc' });
+
+  const [movieToDelete, setMovieToDelete] = useState<Movie | null>(null);
+  const [movieToRename, setMovieToRename] = useState<Movie | null>(null);
+  const [newName, setNewName] = useState("");
+  const [modalLoading, setModalLoading] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [resetConfirmMode, setResetConfirmMode] = useState(false);
+  const [settingsForm, setSettingsForm] = useState({
+    tmdbApiKey: '',
+    aiostreamsUrl: '',
+    targetFolder: '',
+    streamResFilter: 'All',
+    streamVideoFilter: 'All',
+    streamAudioFilter: 'All',
+    streamMinBitrate: 0,
+    streamMaxBitrate: 100,
+    theme: 'dark' as 'light' | 'dark' | 'system'
+  });
+  const [streamSelectorData, setStreamSelectorData] = useState<{movieId: number, streams: any[]} | null>(null);
+
+  // Fetch movies
+  const fetchMovies = async () => {
+    try {
+      const res = await axios.get('/api/movies');
+      setMovies(res.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchSettings = async () => {
+    try {
+      const res = await axios.get('/api/settings');
+      setSettingsForm(res.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  useEffect(() => {
+    fetchMovies();
+    fetchSettings();
+  }, []);
+
+  useEffect(() => {
+    const applyTheme = (theme: 'light' | 'dark' | 'system') => {
+      const root = window.document.documentElement;
+      root.classList.remove('light', 'dark');
+
+      if (theme === 'system') {
+        const mq = window.matchMedia('(prefers-color-scheme: dark)');
+        const systemTheme = mq.matches ? 'dark' : 'light';
+        root.classList.add(systemTheme);
+
+        const handler = (e: MediaQueryListEvent) => {
+          root.classList.remove('light', 'dark');
+          root.classList.add(e.matches ? 'dark' : 'light');
+        };
+
+        mq.addEventListener('change', handler);
+        return () => mq.removeEventListener('change', handler);
+      } else {
+        root.classList.add(theme);
+      }
+    };
+
+    const cleanup = applyTheme(settingsForm.theme);
+    return () => {
+      if (typeof cleanup === 'function') cleanup();
+    };
+  }, [settingsForm.theme]);
+
+  // Polling for background tasks
+  useEffect(() => {
+    const hasTransitionalMovies = movies.some(m => ['fetching_metadata', 'upgrading'].includes(m.status));
+    
+    if (hasTransitionalMovies) {
+      const interval = setInterval(fetchMovies, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [movies]);
+
+  const handleGenerateMocks = async () => {
+    try {
+      setModalLoading(true);
+      await axios.post('/api/generate-mocks');
+      alert("Mock files generated successfully. Click 'Scan Directory' to see them.");
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error generating mocks");
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const saveSettings = async () => {
+    setModalLoading(true);
+    try {
+      await axios.post('/api/settings', settingsForm);
+      setShowSettings(false);
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error saving settings");
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const handleScan = async () => {
+    setIsLoading(true);
+    try {
+      await axios.post('/api/scan');
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error scanning");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSearch = async (movieId: number) => {
+    try {
+      const res = await axios.post('/api/search', { movieId, minRes: maxResFilter, minBitrate: maxBitrateFilter });
+      if (res.data.streams) {
+         setStreamSelectorData({ movieId, streams: res.data.streams });
+      }
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error searching");
+    }
+  };
+
+  const handleSelectStream = async (movieId: number, link: string, meta: any) => {
+     try {
+       await axios.post(`/api/movie/${movieId}/set-stream`, { link, meta });
+       setStreamSelectorData(null);
+       await fetchMovies();
+     } catch (e: any) {
+       alert(e.response?.data?.error || "Error setting stream");
+     }
+  };
+
+  const handleUpgrade = async (movieId: number) => {
+    try {
+      await axios.post('/api/upgrade', { movieId });
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error upgrading");
+    }
+  };
+
+  const handleAcceptUpgrade = async (movieId: number) => {
+    try {
+      await axios.post(`/api/movie/${movieId}/accept-upgrade`);
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error accepting upgrade");
+    }
+  };
+
+  const handleRevertUpgrade = async (movieId: number) => {
+    try {
+      await axios.post(`/api/movie/${movieId}/revert-upgrade`);
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error reverting upgrade");
+    }
+  };
+
+  const handleUpgradeAll = async () => {
+    const readyMovies = movies.filter(m => m.status === 'magnet_found');
+    if (readyMovies.length === 0) return;
+    
+    for (const movie of readyMovies) {
+      try {
+        await axios.post('/api/upgrade', { movieId: movie.id });
+        await fetchMovies();
+        
+        // poll until it stops upgrading, simulating waiting for the download
+        let isUpgrading = true;
+        while (isUpgrading) {
+          await new Promise(r => setTimeout(r, 1000));
+          const res = await axios.get('/api/movies');
+          setMovies(res.data);
+          const currentMovie = res.data.find((m: Movie) => m.id === movie.id);
+          if (currentMovie && currentMovie.status !== 'upgrading') {
+            isUpgrading = false;
+          }
+        }
+      } catch (e: any) {
+        console.error("Failed upgrading movie id " + movie.id, e);
+        alert(e.response?.data?.error || e.message || "Error upgrading movie");
+      }
+    }
+  };
+
+  const handleDelete = async (movie: Movie) => {
+    setMovieToDelete(movie);
+  };
+
+  const confirmDelete = async () => {
+    if (!movieToDelete) return;
+    setModalLoading(true);
+    try {
+      await axios.delete(`/api/movies/${movieToDelete.id}`);
+      await fetchMovies();
+      setMovieToDelete(null);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const handleRename = (movie: Movie) => {
+    setMovieToRename(movie);
+    setNewName(movie.fileName);
+  };
+
+  const confirmRename = async () => {
+    if (!movieToRename || !newName || newName === movieToRename.fileName) {
+      setMovieToRename(null);
+      return;
+    }
+    setModalLoading(true);
+    try {
+      await axios.post('/api/rename', { movieId: movieToRename.id, newName });
+      await fetchMovies();
+      setMovieToRename(null);
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error renaming file");
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const handleRevert = async (movieId: number) => {
+    try {
+      await axios.post('/api/revert', { movieId });
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error reverting");
+    }
+  };
+
+  const handleMatchTmdb = async (movieId: number) => {
+    try {
+      await axios.post(`/api/movie/${movieId}/tmdb`);
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error matching TMDB");
+    }
+  };
+
+  const handleUnmatchTmdb = async (movieId: number) => {
+    try {
+      await axios.post(`/api/movie/${movieId}/unmatch`);
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error unmatching TMDB");
+    }
+  };
+
+  const handleResetDb = async (deleteFiles: boolean) => {
+    try {
+      setModalLoading(true);
+      await axios.post('/api/reset', { deleteFiles });
+      await fetchMovies();
+      setResetConfirmMode(false);
+      setShowSettings(false);
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error resetting database");
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const parseRes = (resStr: string) => {
+    if (!resStr) return 0;
+    const [w, h] = resStr.split('x').map(Number);
+    return w || 0;
+  };
+
+  const requestSort = (key: keyof Movie) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const filteredMovies = React.useMemo(() => {
+    let result = movies.filter(m => {
+      if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) return false;
+      if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) return false;
+      if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) return false;
+      if (statusFilter) {
+        if (statusFilter === 'matched') {
+           if (m.status !== 'indexed' || !m.imdbId) return false;
+        } else if (statusFilter === 'indexed') {
+           if (m.status !== 'indexed' || m.imdbId) return false;
+        } else {
+           if (m.status !== statusFilter) return false;
+        }
+      }
+      return true;
+    });
+
+    if (sortConfig.key) {
+      result.sort((a, b) => {
+        const aVal = a[sortConfig.key!];
+        const bVal = b[sortConfig.key!];
+        
+        if (aVal === undefined) return 1;
+        if (bVal === undefined) return -1;
+
+        if (aVal < bVal) {
+          return sortConfig.direction === 'asc' ? -1 : 1;
+        }
+        if (aVal > bVal) {
+          return sortConfig.direction === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    }
+    return result;
+  }, [movies, maxResFilter, maxBitrateFilter, extFilter, statusFilter, sortConfig]);
+
+  const formatBytes = (bytes: number) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024, dm = 2, sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 font-sans p-4 md:p-6 transition-colors duration-300">
+      <header className="mb-6 md:mb-8 border-b border-slate-200 dark:border-slate-800 pb-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-600 dark:text-indigo-400">
+              <HardDrive className="w-6 h-6" />
+            </div>
+            <h1 className="text-xl md:text-2xl font-semibold text-slate-900 dark:text-slate-100 tracking-tight">Media Upgrader</h1>
+          </div>
+          <div className="flex items-center gap-2 md:gap-4">
+            <button 
+              onClick={() => setShowSettings(true)}
+              className="flex items-center justify-center p-2.5 sm:px-3 sm:py-2 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border border-slate-200 dark:border-slate-700/50 rounded-md font-medium transition-colors shadow-sm min-w-[44px] min-h-[44px]"
+              title="Settings"
+            >
+              <Settings2 className="w-5 h-5" />
+              <span className="hidden sm:inline ml-2">Settings</span>
+            </button>
+            <button 
+              onClick={handleScan}
+              disabled={isLoading || movies.some(m => m.status === 'fetching_metadata')}
+              className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md font-medium transition-colors disabled:opacity-50 min-h-[44px] shadow-sm active:scale-95"
+            >
+              <RefreshCw className={cn("w-4 h-4", (isLoading || movies.some(m => m.status === 'fetching_metadata')) && "animate-spin")} />
+              <span>{isLoading || movies.some(m => m.status === 'fetching_metadata') ? "Scanning..." : "Rescan"}</span>
+            </button>
+            <button 
+              onClick={handleUpgradeAll} 
+              className="hidden md:flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-md font-medium transition-colors shadow-sm"
+            >
+              <Download className="w-4 h-4" />
+              Upgrade All Ready
+            </button>
+          </div>
+        </div>
+        
+        {/* Filters */}
+        <div className="mt-6 flex flex-col md:flex-row md:items-center gap-4 bg-white dark:bg-slate-900/50 p-4 rounded-lg border border-slate-200 dark:border-slate-800/80 shadow-sm">
+          <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
+            <Filter className="w-4 h-4" />
+            <span className="text-sm font-medium">Filters:</span>
+          </div>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:items-center gap-4 flex-1">
+            <select 
+              className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-300 min-h-[44px]"
+              value={maxResFilter}
+              onChange={(e) => setMaxResFilter(e.target.value)}
+            >
+              <option value="">Res: All</option>
+              <option value="720x480">480p</option>
+              <option value="1280x720">720p</option>
+              <option value="1920x1080">1080p</option>
+              <option value="3840x2160">4K</option>
+              <option value="7680x4320">8K</option>
+            </select>
+            
+            <div className="flex flex-col gap-1 sm:col-span-2 lg:col-auto lg:flex-1 lg:max-w-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Max Bitrate</span>
+                <span className="text-xs font-mono text-indigo-500">{maxBitrateFilter ? `${(Number(maxBitrateFilter) / 1000000).toFixed(1)} Mbps` : 'Unlimited'}</span>
+              </div>
+              <input 
+                type="range" 
+                min="0"
+                max="50000000"
+                step="1000000"
+                className="w-full accent-indigo-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                value={maxBitrateFilter || 0}
+                onChange={(e) => setMaxBitrateFilter(e.target.value === '0' ? '' : e.target.value)}
+              />
+            </div>
+
+            <select 
+              className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-300 min-h-[44px]"
+              value={extFilter}
+              onChange={(e) => setExtFilter(e.target.value)}
+            >
+              <option value="">Ext: All</option>
+              <option value=".mp4">.mp4</option>
+              <option value=".mkv">.mkv</option>
+              <option value=".avi">.avi</option>
+              <option value=".webm">.webm</option>
+            </select>
+
+    <select 
+      className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-300 min-h-[44px]"
+      value={statusFilter}
+      onChange={(e) => setStatusFilter(e.target.value)}
+    >
+      <option value="">Status: All</option>
+      <option value="fetching_metadata">Fetching Metadata</option>
+      <option value="indexed">Indexed (Unmatched)</option>
+      <option value="matched">Matched</option>
+      <option value="magnet_found">Ready to Upgrade</option>
+      <option value="upgrading">Upgrading</option>
+      <option value="verifying_upgrade">Verifying Upgrade</option>
+      <option value="upgraded">Upgraded</option>
+    </select>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        {/* Desktop Table View */}
+        <div className="hidden md:block overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 shadow-sm transition-all duration-300">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+              <tr>
+                <SortHeader label="File Name" sortKey="fileName" currentSort={sortConfig} onSort={requestSort} />
+                <SortHeader label="Movie" sortKey="movieName" currentSort={sortConfig} onSort={requestSort} />
+                <SortHeader label="Year" sortKey="year" currentSort={sortConfig} onSort={requestSort} />
+                <SortHeader label="Size" sortKey="fileSize" currentSort={sortConfig} onSort={requestSort} />
+                <SortHeader label="Resolution" sortKey="resolution" currentSort={sortConfig} onSort={requestSort} />
+                <SortHeader label="Bitrate" sortKey="bitrate" currentSort={sortConfig} onSort={requestSort} />
+                <th className="px-4 py-3 font-medium text-center">HDR</th>
+                <SortHeader label="ID" sortKey="imdbId" currentSort={sortConfig} onSort={requestSort} />
+                <SortHeader label="Status" sortKey="status" currentSort={sortConfig} onSort={requestSort} />
+                <th className="px-4 py-3 font-medium text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
+              {filteredMovies.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-4 py-8 text-center text-slate-400 dark:text-slate-500">
+                    No movies found. Click "Rescan Library" to index.
+                  </td>
+                </tr>
+              ) : filteredMovies.map(movie => (
+                <tr key={movie.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/20 transition-colors">
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-300 font-mono text-xs max-w-[200px] truncate" title={movie.fileName}>{movie.fileName}</td>
+                  <td className="px-4 py-3 font-medium text-slate-800 dark:text-slate-200">{movie.movieName}</td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
+                    {movie.year || '-'}
+                  </td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{formatBytes(movie.fileSize)}</td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{movie.resolution}</td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{(movie.bitrate / 1000).toFixed(0)} kbps</td>
+                  <td className="px-4 py-3 text-center">
+                    {movie.hdr ? (
+                      <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20">HDR</span>
+                    ) : (
+                      <span className="text-slate-300 dark:text-slate-600">-</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400 font-mono text-xs">
+                    {movie.imdbId ? (
+                       <span 
+                         className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-500 dark:hover:text-red-400 transition-all border border-transparent hover:border-red-200 dark:hover:border-red-900/50 group relative shadow-sm"
+                         title={movie.tmdbTitle ? `TMDB: ${movie.tmdbTitle}\nClick to remove match` : "Click to remove match"}
+                         onClick={() => {
+                           if (confirm(`Remove match for "${movie.movieName}"?`)) {
+                             handleUnmatchTmdb(movie.id);
+                           }
+                         }}
+                       >
+                         {movie.imdbId}
+                       </span>
+                    ) : '-'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <StatusBadge movie={movie} />
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      {movie.imdbId ? (
+                         <ActionBtn icon={<Search className="w-4 h-4" />} title="Search upgrades" onClick={() => handleSearch(movie.id)} />
+                      ) : (
+                         <ActionBtn icon={<Fingerprint className="w-4 h-4" />} title="Match TMDB" onClick={() => handleMatchTmdb(movie.id)} active />
+                      )}
+                      
+                      {movie.status === 'magnet_found' && (
+                        <ActionBtn icon={<Download className="w-4 h-4" />} title="Execute Upgrade" onClick={() => handleUpgrade(movie.id)} active />
+                      )}
+                      
+                      {movie.status === 'verifying_upgrade' && (
+                        <>
+                          <ActionBtn icon={<Check className="w-4 h-4" />} title="Accept Upgrade" onClick={() => handleAcceptUpgrade(movie.id)} active />
+                          <ActionBtn icon={<RotateCcw className="w-4 h-4" />} title="Revert to Old File" onClick={() => handleRevertUpgrade(movie.id)} danger />
+                        </>
+                      )}
+
+                      {(movie.status !== 'indexed' && movie.status !== 'verifying_upgrade') && (
+                        <ActionBtn icon={<Undo2 className="w-4 h-4" />} title="Revert Status" onClick={() => handleRevert(movie.id)} />
+                      )}
+                      <ActionBtn icon={<Edit2 className="w-4 h-4" />} title="Manual Rename" onClick={() => handleRename(movie)} />
+                      <ActionBtn icon={<Trash2 className="w-4 h-4" />} title="Delete File" onClick={() => handleDelete(movie)} danger />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Mobile Card View */}
+        <div className="md:hidden grid grid-cols-1 gap-4">
+          {filteredMovies.length === 0 ? (
+            <div className="px-4 py-12 text-center text-slate-400 bg-white dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm">
+              No movies found.
+            </div>
+          ) : filteredMovies.map(movie => (
+            <div key={movie.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-4 shadow-sm active:bg-slate-50 dark:active:bg-slate-800 transition-colors">
+              <div className="flex justify-between items-start mb-3">
+                <div className="flex-1 min-w-0 pr-2">
+                  <h3 className="font-semibold text-slate-900 dark:text-slate-100 truncate">{movie.movieName}</h3>
+                  <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5 truncate">{movie.fileName}</p>
+                </div>
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {movie.hdr && <span className="px-1.5 py-0.5 rounded text-[8px] uppercase font-bold bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20 shadow-sm">HDR</span>}
+                  <span className="text-xs font-medium text-slate-500">{movie.year || '-'}</span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-x-4 gap-y-2 mb-4 text-xs">
+                <div className="flex flex-col">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Resolution</span>
+                  <span className="text-slate-700 dark:text-slate-300 font-medium">{movie.resolution}</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Size</span>
+                  <span className="text-slate-700 dark:text-slate-300 font-medium">{formatBytes(movie.fileSize)}</span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Bitrate</span>
+                  <span className="text-slate-700 dark:text-slate-300 font-medium">{(movie.bitrate / 1000).toFixed(0)} kbps</span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between pt-4 border-t border-slate-100 dark:border-slate-800 gap-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StatusBadge movie={movie} />
+                  {movie.imdbId && (
+                    <button 
+                      className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 border border-transparent shadow-sm whitespace-nowrap active:bg-red-50 dark:active:bg-red-900/30 font-medium"
+                      onClick={() => {
+                        if (confirm(`Remove match for "${movie.movieName}"?`)) {
+                          handleUnmatchTmdb(movie.id);
+                        }
+                      }}
+                    >
+                      {movie.imdbId}
+                    </button>
+                  )}
+                </div>
+                
+                <div className="flex items-center gap-1.5 ml-auto">
+                  {movie.imdbId ? (
+                     <ActionBtn icon={<Search className="w-5 h-5" />} title="Search Upgrades" onClick={() => handleSearch(movie.id)} />
+                  ) : (
+                     <ActionBtn icon={<Fingerprint className="w-5 h-5" />} title="Match TMDB" onClick={() => handleMatchTmdb(movie.id)} active />
+                  )}
+                  
+                  {movie.status === 'magnet_found' && (
+                    <ActionBtn icon={<Download className="w-5 h-5" />} title="Execute Upgrade" onClick={() => handleUpgrade(movie.id)} active />
+                  )}
+                  
+                  {movie.status === 'verifying_upgrade' && (
+                    <ActionBtn icon={<Check className="w-5 h-5" />} title="Accept Upgrade" onClick={() => handleAcceptUpgrade(movie.id)} active />
+                  )}
+                  
+                  <ActionBtn icon={<Trash2 className="w-5 h-5" />} title="Delete File" onClick={() => handleDelete(movie)} danger />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </main>
+
+      {/* Delete Modal */}
+      {movieToDelete && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl w-full max-w-md p-6">
+            <h3 className="text-xl font-medium text-slate-900 dark:text-slate-100 mb-2">Delete File?</h3>
+            <p className="text-slate-600 dark:text-slate-400 mb-6 text-sm">
+              Are you sure you want to delete <span className="text-slate-900 dark:text-slate-200 font-mono font-semibold">{movieToDelete.fileName}</span>? This action cannot be undone and will remove the file from your disk.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setMovieToDelete(null)}
+                disabled={modalLoading}
+                className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-md text-sm font-medium transition-colors border border-slate-200 dark:border-slate-700"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmDelete}
+                disabled={modalLoading}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                {modalLoading && <RefreshCw className="w-4 h-4 animate-spin" />}
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename Modal */}
+      {movieToRename && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-medium text-slate-900 dark:text-slate-100">Rename File</h3>
+              <button onClick={() => setMovieToRename(null)} className="text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">New file name</label>
+              <input 
+                type="text" 
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 font-mono shadow-sm"
+              />
+            </div>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setMovieToRename(null)}
+                disabled={modalLoading}
+                className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-md text-sm font-medium transition-colors border border-slate-200 dark:border-slate-700"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmRename}
+                disabled={modalLoading || !newName.trim() || newName === movieToRename.fileName}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                {modalLoading && <RefreshCw className="w-4 h-4 animate-spin" />}
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stream Selector Modal */}
+      {streamSelectorData && (
+        <StreamSelectorModal
+          data={streamSelectorData}
+          defaultFilters={settingsForm}
+          onClose={() => setStreamSelectorData(null)}
+          onSelect={(link: string, meta: any) => handleSelectStream(streamSelectorData.movieId, link, meta)}
+        />
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl w-full max-w-xl p-6 overflow-y-auto max-h-[90vh]">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xl font-medium text-slate-900 dark:text-slate-100">Settings</h3>
+              <button onClick={() => setShowSettings(false)} className="text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">TMDB API Key</label>
+                <input 
+                  type="text" 
+                  value={settingsForm.tmdbApiKey}
+                  onChange={e => setSettingsForm({...settingsForm, tmdbApiKey: e.target.value})}
+                  placeholder="Enter TMDB API Key or Bearer Token"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 shadow-sm"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">AIOStreams URL</label>
+                <input 
+                  type="text" 
+                  value={settingsForm.aiostreamsUrl}
+                  onChange={e => setSettingsForm({...settingsForm, aiostreamsUrl: e.target.value})}
+                  placeholder="https://aiostreams.domain/YOUR_CONFIG_STRING"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 shadow-sm"
+                />
+                <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">
+                  Generate this on your AIOStreams setup page. Paste the URL but omit <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded text-slate-500 dark:text-slate-400">/manifest.json</code> at the end.
+                </p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">Target Folder (Absolute Path)</label>
+                <input 
+                  type="text" 
+                  value={settingsForm.targetFolder}
+                  onChange={e => setSettingsForm({...settingsForm, targetFolder: e.target.value})}
+                  placeholder="/path/to/media/movies"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 font-mono shadow-sm"
+                />
+                <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">Changing this will create the folder if it does not exist.</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">Theme</label>
+                <div className="flex gap-2 p-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm">
+                  {(['system', 'light', 'dark'] as const).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setSettingsForm({ ...settingsForm, theme: t })}
+                      className={cn(
+                        "flex-1 px-3 py-1.5 text-xs font-medium rounded-md capitalize transition-all",
+                        settingsForm.theme === t 
+                          ? "bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-sm border border-slate-200 dark:border-slate-700" 
+                          : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300"
+                      )}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
+                <h4 className="text-sm font-medium text-slate-900 dark:text-slate-200 mb-4">Default Stream Filters</h4>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Resolution</label>
+                    <select 
+                      value={settingsForm.streamResFilter}
+                      onChange={e => setSettingsForm({...settingsForm, streamResFilter: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-2 py-1.5 text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="All">All</option>
+                      <option value="4K">4K</option>
+                      <option value="1080p">1080p</option>
+                      <option value="720p">720p</option>
+                      <option value="480p">480p</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Video Format</label>
+                    <select 
+                      value={settingsForm.streamVideoFilter}
+                      onChange={e => setSettingsForm({...settingsForm, streamVideoFilter: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-2 py-1.5 text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="All">All</option>
+                      <option value="Dolby Vision">Dolby Vision</option>
+                      <option value="HDR10">HDR10</option>
+                      <option value="HDR">HDR</option>
+                      <option value="SDR">SDR</option>
+                      <option value="HEVC">HEVC</option>
+                      <option value="AVC">AVC</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Audio Format</label>
+                    <select 
+                      value={settingsForm.streamAudioFilter}
+                      onChange={e => setSettingsForm({...settingsForm, streamAudioFilter: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-2 py-1.5 text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="All">All</option>
+                      <option value="TrueHD">TrueHD</option>
+                      <option value="Atmos">Atmos</option>
+                      <option value="DTS-HD MA">DTS-HD MA</option>
+                      <option value="DTS">DTS</option>
+                      <option value="EAC3">EAC3</option>
+                      <option value="AC3">AC3</option>
+                      <option value="AAC">AAC</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                   <label className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1 flex justify-between">
+                     <span>Bitrate Default Range</span>
+                     <span className="text-indigo-600 dark:text-indigo-400">
+                       {settingsForm.streamMinBitrate} - {settingsForm.streamMaxBitrate >= 100 ? 'Max' : settingsForm.streamMaxBitrate} Mbps
+                     </span>
+                   </label>
+                   <div className="pt-2 px-1">
+                     <Slider.Root
+                        className="relative flex items-center select-none touch-none w-full h-5"
+                        value={[settingsForm.streamMinBitrate, settingsForm.streamMaxBitrate]}
+                        onValueChange={([min, max]) => setSettingsForm({ ...settingsForm, streamMinBitrate: min, streamMaxBitrate: max })}
+                        max={100}
+                        step={1}
+                        minStepsBetweenThumbs={0}
+                      >
+                        <Slider.Track className="bg-slate-200 dark:bg-slate-800 relative grow rounded-full h-[3px]">
+                          <Slider.Range className="absolute bg-indigo-500 rounded-full h-full" />
+                        </Slider.Track>
+                        <Slider.Thumb
+                          className="block w-4 h-4 bg-white border-2 border-indigo-500 rounded-lg hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-400/50 transition-colors shadow-lg cursor-pointer"
+                          aria-label="Min bitrate"
+                        />
+                        <Slider.Thumb
+                          className="block w-4 h-4 bg-white border-2 border-indigo-500 rounded-lg hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-400/50 transition-colors shadow-lg cursor-pointer"
+                          aria-label="Max bitrate"
+                        />
+                      </Slider.Root>
+                   </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center pt-2 border-t border-slate-100 dark:border-slate-800">
+              {resetConfirmMode ? (
+                <div className="flex flex-col gap-2 w-full">
+                  <p className="text-sm text-red-500 dark:text-red-400 font-medium mb-1">Confirm Database Reset</p>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => handleResetDb(true)}
+                      disabled={modalLoading}
+                      className="px-4 py-2 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 border border-red-200 dark:border-red-900/50 text-red-700 dark:text-red-100 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
+                    >
+                      Reset DB & Mock files
+                    </button>
+                    <button 
+                      onClick={() => handleResetDb(false)}
+                      disabled={modalLoading}
+                      className="px-4 py-2 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-300 rounded-md text-sm font-medium transition-colors disabled:opacity-50"
+                    >
+                      Reset DB only
+                    </button>
+                    <button 
+                      onClick={() => setResetConfirmMode(false)}
+                      disabled={modalLoading}
+                      className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-md text-sm font-medium transition-colors sm:ml-auto disabled:opacity-50 border border-slate-200 dark:border-slate-700"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setResetConfirmMode(true)}
+                      className="px-3 py-2 bg-red-50 dark:bg-red-900/30 hover:bg-red-100 dark:hover:bg-red-800/50 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900/50 rounded-md text-xs font-medium transition-colors flex items-center gap-2"
+                    >
+                      <Database className="w-3.5 h-3.5" />
+                      Reset Database
+                    </button>
+                    <button 
+                      onClick={handleGenerateMocks}
+                      disabled={modalLoading}
+                      className="px-3 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-md text-xs font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+                    >
+                      <HardDrive className="w-3.5 h-3.5" />
+                      Generate Mocks
+                    </button>
+                  </div>
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => setShowSettings(false)}
+                      disabled={modalLoading}
+                      className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-md text-sm font-medium transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={saveSettings}
+                      disabled={modalLoading}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-sm font-medium transition-colors flex items-center gap-2 shadow-md shadow-indigo-500/20"
+                    >
+                      {modalLoading && <RefreshCw className="w-4 h-4 animate-spin" />}
+                      Save Settings
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({ movie }: { movie: Movie }) {
+  switch (movie.status) {
+    case 'fetching_metadata':
+      return <span className="text-xs px-2 py-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500 border border-yellow-500/20 flex w-max items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin"/> Fetching Info</span>;
+    case 'indexed':
+      if (movie.imdbId) {
+        return <span className="text-xs px-2 py-1 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 uppercase tracking-wider font-semibold text-[10px]">Matched</span>;
+      }
+      return <span className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-semibold text-[10px]">Indexed</span>;
+    case 'magnet_found':
+      return <span className="text-xs px-2 py-1 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">Ready to Upgrade</span>;
+    case 'upgrading':
+      return (
+        <div className="flex flex-col gap-1.5 w-32">
+          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-wider flex justify-between">
+            <span>Upgrading</span>
+            <span>{movie.progress || 0}%</span>
+          </span>
+          <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-1 overflow-hidden shadow-inner">
+            <div 
+              className="bg-indigo-500 h-full transition-all duration-500 ease-out shadow-sm" 
+              style={{ width: `${movie.progress || 0}%` }}
+            />
+          </div>
+        </div>
+      );
+    case 'verifying_upgrade':
+      return <span className="text-xs px-2 py-1 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 flex w-max items-center gap-1 uppercase font-bold text-[10px]">Verifying</span>;
+    case 'upgraded':
+      return <span className="text-xs px-2 py-1 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-medium">Upgraded</span>;
+    default:
+      return <span className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-semibold text-[10px]">{movie.status}</span>;
+  }
+}
+
+function SortHeader({ label, sortKey, currentSort, onSort }: { label: string, sortKey: keyof Movie, currentSort: { key: keyof Movie | null, direction: 'asc' | 'desc' }, onSort: (key: keyof Movie) => void }) {
+  const isActive = currentSort.key === sortKey;
+  
+  return (
+    <th className="px-4 py-3 font-medium group cursor-pointer select-none" onClick={() => onSort(sortKey)}>
+      <div className="flex items-center gap-1 hover:text-slate-900 dark:hover:text-slate-200 transition-colors">
+        {label}
+        <div className={cn("opacity-0 group-hover:opacity-100 transition-opacity flex flex-col -gap-1", isActive && "opacity-100 text-indigo-600 dark:text-indigo-400")}>
+          <svg className={cn("w-2.5 h-2.5 fill-current transition-colors", isActive && currentSort.direction === 'asc' ? "text-indigo-600 dark:text-indigo-400" : "text-slate-300 dark:text-slate-600")} viewBox="0 0 32 32">
+            <path d="M16 4l-12 12h24z" />
+          </svg>
+          <svg className={cn("w-2.5 h-2.5 fill-current transition-colors", isActive && currentSort.direction === 'desc' ? "text-indigo-600 dark:text-indigo-400" : "text-slate-300 dark:text-slate-600")} viewBox="0 0 32 32">
+            <path d="M16 28l12-12h-24z" />
+          </svg>
+        </div>
+      </div>
+    </th>
+  );
+}
+
+function ActionBtn({ icon, onClick, title, danger, active }: { icon: React.ReactNode, onClick: () => void, title: string, danger?: boolean, active?: boolean }) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "p-1.5 rounded transition-all transform active:scale-95",
+        danger ? "text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10" : 
+        active ? "text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 hover:bg-indigo-100 dark:hover:bg-indigo-500/20" :
+        "text-slate-400 dark:text-slate-500 hover:text-slate-900 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+      )}
+    >
+      {icon}
+    </button>
+  );
+}
+
