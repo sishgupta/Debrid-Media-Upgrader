@@ -4,21 +4,27 @@ echo STEP 2: DOWNLOAD SOURCE FROM GITHUB
 echo ======================================================
 echo.
 
-set /p RepoUrl="Enter your GitHub Repository URL (e.g., https://github.com/user/repo.git): "
+set "RepoUrl=https://github.com/sishgupta/Debrid-Media-Upgrader.git"
 
-if "%RepoUrl%"=="" (
-    echo [ERROR] No URL provided.
+echo Cloning repository: %RepoUrl%
+echo.
+
+git clone %RepoUrl%
+
+if %errorLevel% neq 0 (
+    echo.
+    echo [ERROR] Git clone failed. 
+    echo Please ensure Git is installed and you have an internet connection.
     pause
     exit /b 1
 )
 
 echo.
-echo Cloning repository...
-git clone %RepoUrl%
-
-echo.
 echo ======================================================
 echo DOWNLOAD COMPLETE
-echo You can now navigate into the folder and run local_run.bat
+echo.
+echo Next steps:
+echo 1. Enter the directory: cd Debrid-Media-Upgrader
+echo 2. Run local_run.bat to start the app.
 echo ======================================================
 pause
