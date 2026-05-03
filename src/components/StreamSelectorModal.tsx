@@ -183,7 +183,7 @@ export default function StreamSelectorModal({ data, onClose, onSelect, defaultFi
                 </div>
               </div>
               <button
-                onClick={() => onSelect(stream.link, { ...stream.meta, streamName: stream.name, filename: stream.filename })}
+                onClick={() => onSelect(stream.url || stream.link || stream.externalUrl || stream.infoHash, { ...stream.meta, streamName: stream.name, filename: stream.filename })}
                 className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm font-medium transition-colors shrink-0 shadow mt-2"
               >
                 Select

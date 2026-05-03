@@ -412,7 +412,7 @@ async function runUpgrade(movieId: number) {
       
       saveDb();
     } else {
-      console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
+      console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err?.message || err, err?.stack);
       // Wait, failure could be temporary, let's just 'pause' it or put it in an error state we can resume.
       // Easiest is just to log it and allow resume by setting to paused.
       movie.status = 'paused'; 
@@ -427,14 +427,17 @@ async function downloadFile(url: string, destPath: string, onProgress: (progress
     existingSize = fs.statSync(destPath).size;
   }
 
-  const headers: HeadersInit = {};
+  const headers: HeadersInit = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': '*/*'
+  };
   if (existingSize > 0) {
     headers['Range'] = `bytes=${existingSize}-`;
   }
 
   const response = await fetch(url, { headers, signal });
   if (!response.ok && response.status !== 206) {
-    throw new Error(`Failed to download: ${response.statusText}`);
+    throw new Error(`Failed to download: ${response.status} ${response.statusText} from ${url}`);
   }
 
   let totalSize = Number(response.headers.get('content-length')) || 0;
