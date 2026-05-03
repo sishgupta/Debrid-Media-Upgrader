@@ -63,6 +63,7 @@ export default function StreamSelectorModal({ data, onClose, onRefresh, onSelect
   const [videoFilter, setVideoFilter] = useState(defaultFilters?.streamVideoFilter || 'All');
   const [audioFilter, setAudioFilter] = useState(defaultFilters?.streamAudioFilter || 'All');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [selectingIdx, setSelectingIdx] = useState<number | null>(null);
   const [minBitrateFilter, setMinBitrateFilter] = useState(defaultFilters?.streamMinBitrate || 0);
   const [maxBitrateFilter, setMaxBitrateFilter] = useState(defaultFilters?.streamMaxBitrate !== undefined ? defaultFilters.streamMaxBitrate : 100);
 
@@ -73,6 +74,15 @@ export default function StreamSelectorModal({ data, onClose, onRefresh, onSelect
       await onRefresh();
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleSelect = async (idx: number, stream: any) => {
+    setSelectingIdx(idx);
+    try {
+      await onSelect(stream.url || stream.link || stream.externalUrl || stream.infoHash, { ...stream.meta, streamName: stream.name, filename: stream.filename });
+    } finally {
+      setSelectingIdx(null);
     }
   };
 
@@ -228,10 +238,13 @@ export default function StreamSelectorModal({ data, onClose, onRefresh, onSelect
                     </div>
                   </div>
                   <button
-                    onClick={() => onSelect(stream.url || stream.link || stream.externalUrl || stream.infoHash, { ...stream.meta, streamName: stream.name, filename: stream.filename })}
-                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm font-medium transition-colors shrink-0 shadow mt-2"
+                    onClick={() => handleSelect(idx, stream)}
+                    disabled={selectingIdx !== null}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm font-medium transition-colors shrink-0 shadow mt-2 disabled:opacity-50 min-w-[80px] flex items-center justify-center"
                   >
-                    Select
+                    {selectingIdx === idx ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : 'Select'}
                   </button>
                 </div>
               ))}
