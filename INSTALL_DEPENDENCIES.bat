@@ -1,4 +1,7 @@
 @echo off
+:: Ensure we are running from the script's directory
+cd /d "%~dp0"
+
 echo ======================================================
 echo STEP 1: INSTALLING SYSTEM REQUIREMENTS
 echo ======================================================
