@@ -1579,16 +1579,19 @@ async function startServer() {
     if (viteServer) {
       viteServer.close().catch(console.error);
     }
+    
+    // Attempt graceful close but don't hang for keep-alive connections
     server.close(() => {
       console.log("[Server] HTTP server closed. Goodbye!");
       process.exit(0);
     });
     
-    // Force exit if keeping alive too long (e.g. hanging connections)
+    // In many environments, the server.close() callback might take too long
+    // due to idle keep-alive connections. We force exit after a short delay.
     setTimeout(() => {
-      console.error("[Server] Clean shutdown timed out. Forcing exit.");
-      process.exit(1);
-    }, 2000).unref();
+      console.log("[Server] Orderly shutdown complete (Forced).");
+      process.exit(0);
+    }, 500).unref();
   };
 
   process.on('SIGINT', gracefulShutdown);
@@ -1598,19 +1601,16 @@ async function startServer() {
     process.exit(1);
   });
 
-  // If running in an interactive terminal, allow 'q' or 'ctrl+c' character to exit
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (key: string) => {
-      // ctrl-c ( unicode \u0003 ) or 'q'
-      if (key === '\u0003' || key.toLowerCase() === 'q') {
-        gracefulShutdown();
-      }
-    });
-    console.log("[Server] Press Ctrl+C or 'q' to stop the server.");
-  }
+  // Standard line-based input for "q" or "exit"
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (data: string) => {
+    const input = data.toString().trim().toLowerCase();
+    if (input === 'q' || input === 'exit' || input === 'stop') {
+      gracefulShutdown();
+    }
+  });
+  console.log("[Server] Press Ctrl+C or type 'q' + Enter to stop the server.");
 
   // Background Queue Worker
   setInterval(async () => {
