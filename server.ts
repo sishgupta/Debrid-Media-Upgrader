@@ -146,8 +146,6 @@ function deleteCompanionSubtitles(videoPath: string) {
     const subExts = ['.srt', '.sub', '.ass', '.vtt', '.idx'];
     
     for (const f of files) {
-      // Check if file starts with the same basename and has a subtitle extension
-      // This handles "Movie.srt", "Movie.en.srt", etc.
       if (f.startsWith(baseName)) {
         const lowerF = f.toLowerCase();
         if (subExts.some(ext => lowerF.endsWith(ext))) {
@@ -161,6 +159,43 @@ function deleteCompanionSubtitles(videoPath: string) {
     }
   } catch (e) {
     console.error("Error deleting companion subtitles:", e);
+  }
+}
+
+// Helper to download a file with progress reporting
+async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download: ${response.statusText}`);
+  }
+
+  const totalSize = Number(response.headers.get('content-length')) || 0;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Could not get reader from response body");
+
+  const writer = fs.createWriteStream(destPath);
+  let downloadedSize = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      writer.write(value);
+      downloadedSize += value.length;
+      
+      if (totalSize > 0) {
+        const progress = Math.round((downloadedSize / totalSize) * 100);
+        onProgress(progress);
+      }
+    }
+  } finally {
+    writer.end();
+    // Return a promise that resolves when the writer is finished
+    await new Promise<void>((resolve, reject) => {
+      writer.on('finish', () => resolve());
+      writer.on('error', (err) => reject(err));
+    });
   }
 }
 
@@ -353,6 +388,8 @@ async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
   return data;
 }
 
+const MOCK_DIR = path.join(process.cwd(), "mock_media");
+
 // Ensure dummy files exist to test scanning
 function createMockMediaFiles() {
   const dummyFiles = [
@@ -373,9 +410,13 @@ function createMockMediaFiles() {
     "Mad Max Fury Road (2015).webm"
   ];
   
-  const mediaDir = getMediaDir();
+  // SAFETY: Mock files can ONLY be created in the designated MOCK_DIR
+  if (!fs.existsSync(MOCK_DIR)) {
+    fs.mkdirSync(MOCK_DIR, { recursive: true });
+  }
+
   dummyFiles.forEach(file => {
-    const fullPath = path.join(mediaDir, file);
+    const fullPath = path.join(MOCK_DIR, file);
     if (!fs.existsSync(fullPath)) {
       try {
         fs.writeFileSync(fullPath, "dummy video data");
@@ -621,14 +662,25 @@ async function startServer() {
     if (deleteFiles) {
       try {
         const mediaDir = getMediaDir();
-        if (fs.existsSync(mediaDir)) {
-          const files = fs.readdirSync(mediaDir);
-          for (const file of files) {
-            const filePath = path.join(mediaDir, file);
-            if (fs.statSync(filePath).isFile()) {
-              fs.unlinkSync(filePath);
+        // ULTIMATE SAFETY: We ONLY allow bulk deletion if the folder is the designated MOCK_DIR
+        // This prevents accidental wipes of real libraries if someone clicks "Delete Files" by mistake.
+        if (mediaDir === MOCK_DIR || mediaDir.toLowerCase().includes('mock')) {
+          if (fs.existsSync(mediaDir)) {
+            const files = fs.readdirSync(mediaDir);
+            for (const file of files) {
+              const filePath = path.join(mediaDir, file);
+              if (fs.statSync(filePath).isFile()) {
+                fs.unlinkSync(filePath);
+              }
             }
           }
+           console.log(`[Safety] Bulk delete executed on safe mock directory: ${mediaDir}`);
+        } else {
+          console.warn(`[Safety] BLOCKED bulk delete request on real directory: ${mediaDir}`);
+          return res.json({ 
+            success: true, 
+            message: "Database reset. File deletion was SKIPPED because you are using a real media folder (Safety Lock)." 
+          });
         }
       } catch (e) {
         console.error("Failed to delete files during DB reset:", e);
@@ -641,7 +693,9 @@ async function startServer() {
   app.post("/api/generate-mocks", (req, res) => {
     try {
       createMockMediaFiles();
-      res.json({ success: true, message: "Mock files generated successfully" });
+      // Automatically switch the user's focus to the mock folder so they can see the results
+      saveSettings({ targetFolder: MOCK_DIR });
+      res.json({ success: true, message: "Mock files generated in ./mock_media and settings updated." });
     } catch (e) {
       res.status(500).json({ error: String(e) });
     }
@@ -724,128 +778,112 @@ async function startServer() {
     const { movieId } = req.body;
     try {
       const movie = db.find(m => m.id === Number(movieId));
-      if (movie) {
+      if (movie && movie.status !== 'upgrading') {
         movie.status = 'upgrading';
         movie.progress = 0;
         saveDb();
         
         console.log(`[Upgrade] Starting upgrade process for "${movie.movieName}"`);
-        console.log(`[Upgrade] SOURCE LINK (Debrid/Magnet): ${movie.magnetLink || 'N/A'}`);
+        console.log(`[Upgrade] SOURCE LINK: ${movie.magnetLink || 'N/A'}`);
         
-        // Detailed simulation worker
-        let currentProgress = 0;
-        const interval = setInterval(() => {
-          const m = db.find(x => x.id === Number(movieId));
-          if (!m) {
-            clearInterval(interval);
-            return;
-          }
+        if (!movie.magnetLink) {
+           movie.status = 'indexed';
+           saveDb();
+           return res.status(400).json({ error: "No magnet link/download URL found" });
+        }
 
-          currentProgress += Math.floor(Math.random() * 15) + 5;
-          if (currentProgress >= 100) {
-            currentProgress = 100;
-            m.status = 'upgraded';
-            m.progress = 100;
-            
-            // Execute file operations simulation
-            const oldPath = m.filePath;
+        // Run download in background
+        (async () => {
+          try {
+            const oldPath = movie.filePath;
             const parentDir = path.dirname(oldPath);
-            const extension = m.upgradeMeta?.extension || m.ext || path.extname(oldPath) || '.mkv';
+            const extension = movie.upgradeMeta?.extension || movie.ext || path.extname(oldPath) || '.mkv';
             
-            // 1. Stage with the "AIStreams" name (mocking the download destination)
-            const baseFileName = m.upgradeMeta?.filename || m.upgradeMeta?.streamName;
-            const downloadFileName = baseFileName 
+            const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
+            const stagingFileName = baseFileName 
               ? `${sanitizeFileName(baseFileName)}.tmp` 
-              : `download_staging_${m.id}.tmp`;
-            const downloadPath = path.join(parentDir, downloadFileName);
-            
-            try {
-              // Create the "downloaded" file (mock)
-              fs.writeFileSync(downloadPath, 'MOCK DOWNLOADED CONTENT');
-              console.log(`Downloaded mock file to staging: ${downloadPath}`);
+              : `download_staging_${movie.id}.tmp`;
+            const stagingPath = path.join(parentDir, stagingFileName);
 
-              // 2. Standard naming for final destination: "Movie Title (Year).ext"
-              const nameSegments = [m.movieName];
-              if (m.year) nameSegments.push(`(${m.year})`);
-              const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
-              const finalPath = path.join(parentDir, finalFileName);
+            // REAL DOWNLOAD
+            console.log(`[Upgrade] Downloading to staging: ${stagingPath}`);
+            await downloadFile(movie.magnetLink!, stagingPath, (p) => {
+              movie.progress = p;
+              // Throttle DB saves a bit? every 5%?
+              if (p % 5 === 0) saveDb();
+            });
 
-              // 3. Backup the old file
-              if (fs.existsSync(oldPath)) {
-                // Delete companion subtitles for the old file
-                deleteCompanionSubtitles(oldPath);
-                
-                const backupPath = oldPath + '.bak';
-                fs.renameSync(oldPath, backupPath);
-                m.oldFilePath = backupPath;
-                m.oldMeta = {
-                  resolution: m.resolution,
-                  bitrate: m.bitrate,
-                  fileSize: m.fileSize,
-                  hdr: m.hdr
-                };
-                console.log(`Backed up old version to: ${backupPath}`);
+            console.log(`[Upgrade] Download complete for "${movie.movieName}"`);
+
+            // Standard naming for final destination: "Movie Title (Year).ext"
+            const nameSegments = [movie.movieName];
+            if (movie.year) nameSegments.push(`(${movie.year})`);
+            const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
+            const finalPath = path.join(parentDir, finalFileName);
+
+            // 1. Delete companion subtitles for the old file
+            deleteCompanionSubtitles(oldPath);
+
+            // 2. Backup the old file
+            if (fs.existsSync(oldPath)) {
+              // Ensure we don't overwrite an existing backup if multiple upgrades fail
+              let backupPath = oldPath + '.bak';
+              if (fs.existsSync(backupPath)) {
+                backupPath = oldPath + '.' + Date.now() + '.bak';
               }
-              
-              // 4. Rename/Move from staging to final location
-              fs.renameSync(downloadPath, finalPath);
-              console.log(`Finalized upgrade: ${downloadPath} -> ${finalPath}`);
-
-              m.filePath = finalPath;
-              m.fileName = finalFileName;
-              m.ext = extension;
-              m.status = 'verifying_upgrade';
-            } catch (fsErr) {
-              console.error("FS Simulation error during upgrade:", fsErr);
-              m.status = 'indexed';
+              fs.renameSync(oldPath, backupPath);
+              movie.oldFilePath = backupPath;
+              movie.oldMeta = {
+                resolution: movie.resolution,
+                bitrate: movie.bitrate,
+                fileSize: movie.fileSize,
+                hdr: movie.hdr
+              };
+              console.log(`[Upgrade] Backed up old version to: ${backupPath}`);
             }
+            
+            // 3. Move from staging to final location
+            if (fs.existsSync(finalPath) && finalPath !== oldPath) {
+               // If there's a file already at finalPath (unlikely due to sanitization but possible), 
+               // we should probably rename it too or overwrite.
+               fs.unlinkSync(finalPath);
+            }
+            fs.renameSync(stagingPath, finalPath);
+            console.log(`[Upgrade] Finalized upgrade: ${stagingPath} -> ${finalPath}`);
+
+            movie.filePath = finalPath;
+            movie.fileName = finalFileName;
+            movie.ext = extension;
+            movie.status = 'verifying_upgrade';
+            movie.progress = 100;
 
             // Re-scan metadata for validation
-            (async () => {
-              try {
-                const meta = await getMediaMetadata(m.filePath);
-                const stat = fs.statSync(m.filePath);
-
-                // Update with real info from disk
-                m.resolution = meta.resolution;
-                m.bitrate = meta.bitrate;
-                m.hdr = meta.hdr;
-                m.fileSize = stat.size;
-
-                // Fallback for mock environment: if the file is still a mock (small),
-                // we'll assume the upgrade "worked" and set high-quality values
-                // to demonstrate the UI behavior.
-                if (m.fileSize <= 1000) {
-                  if (m.upgradeMeta) {
-                    m.resolution = m.upgradeMeta.res === '4K' ? '3840x2160' : 
-                                   m.upgradeMeta.res === '1080p' ? '1920x1080' :
-                                   m.upgradeMeta.res === '720p' ? '1280x720' : m.upgradeMeta.res;
-                    m.bitrate = m.upgradeMeta.bitrateMbps * 1000000;
-                    m.fileSize = m.upgradeMeta.sizeGiB * 1024 * 1024 * 1024;
-                    m.hdr = m.upgradeMeta.video.includes('HDR') || m.upgradeMeta.video.includes('Dolby Vision');
-                  } else {
-                    m.resolution = '3840x2160';
-                    m.bitrate = 25000000;
-                    m.fileSize = 15000000000;
-                    m.hdr = true;
-                  }
-                }
-              } catch (e) {
-                console.error("Re-scan failed during upgrade validation", e);
-              }
-              m.magnetLink = null;
-              m.upgradeMeta = undefined;
-              saveDb();
-            })();
+            try {
+              const meta = await getMediaMetadata(movie.filePath);
+              const stat = fs.statSync(movie.filePath);
+              movie.resolution = meta.resolution;
+              movie.bitrate = meta.bitrate;
+              movie.hdr = meta.hdr;
+              movie.fileSize = stat.size;
+            } catch (e) {
+              console.error("[Upgrade] Re-scan failed", e);
+            }
             
-            clearInterval(interval);
-          } else {
-            m.progress = currentProgress;
+            movie.magnetLink = null;
+            movie.upgradeMeta = undefined;
+            saveDb();
+
+          } catch (err: any) {
+            console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
+            movie.status = 'indexed'; // Revert status so user can try again
+            movie.progress = 0;
             saveDb();
           }
-        }, 1000);
+        })();
+
+        return res.json({ success: true, message: "Upgrade started" });
       }
-      res.json({ success: true, message: "Upgrade simulation started" });
+      res.status(404).json({ error: "Movie not found or already upgrading" });
     } catch (error) {
        res.status(500).json({ error: String(error) });
     }

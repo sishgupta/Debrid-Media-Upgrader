@@ -343,6 +343,9 @@ export default function App() {
 
   const filteredMovies = React.useMemo(() => {
     let result = movies.filter(m => {
+      // Keep movies that are currently being upgraded or verifying always visible
+      if (['upgrading', 'verifying_upgrade'].includes(m.status)) return true;
+
       if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) return false;
       if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) return false;
       if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) return false;
