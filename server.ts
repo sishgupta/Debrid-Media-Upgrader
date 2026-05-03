@@ -434,6 +434,13 @@ async function downloadFile(url: string, destPath: string, onProgress: (progress
   }
 
   const response = await fetch(url, { headers, signal });
+  
+  // Detect if we were redirected to a placeholder video (common in some Stremio/Debrid setups)
+  const finalUrl = response.url.toLowerCase();
+  if (finalUrl.includes('downloading.mp4') || finalUrl.includes('placeholder.mp4')) {
+    throw new Error(`Redirected to a placeholder video: ${response.url}. The stream may still be caching or resolution failed.`);
+  }
+
   if (!response.ok && response.status !== 206) {
     let errText = response.statusText;
     try { errText = await response.text(); } catch (e) {}
@@ -581,8 +588,25 @@ async function unrollAiostreamsLink(link: string): Promise<string | null> {
         
         // Handle direct redirects (Debrid/Torbox usually)
         if (probeRes.status >= 300 && probeRes.status < 400 && probeRes.headers.get('location')) {
-            const loc = probeRes.headers.get('location');
-            if (loc) return loc;
+            let loc = probeRes.headers.get('location');
+            if (loc) {
+                // Resolve relative redirects against the probe URL
+                if (!loc.startsWith('http')) {
+                    try {
+                        loc = new URL(loc, link).toString();
+                    } catch (e) {
+                        console.warn(`[Unroll] Failed to resolve relative redirect: ${loc} using base ${link}`);
+                    }
+                }
+
+                // If it's a known placeholder (like downloading.mp4), treat as failure
+                if (loc.toLowerCase().includes('downloading.mp4') || loc.toLowerCase().includes('placeholder.mp4')) {
+                   console.log(`[Unroll] Detected placeholder redirect: ${loc}. Ignoring.`);
+                   return null;
+                }
+
+                return loc;
+            }
         }
 
         // If it's already a direct debrid link (200 OK), return as is
@@ -1575,42 +1599,76 @@ async function startServer() {
   });
 
   const gracefulShutdown = () => {
-    console.log("\n[Server] Shutting down cleanly...");
-    if (viteServer) {
-      viteServer.close().catch(console.error);
+    console.log("\n[Server] Shutdown signal received. Closing server handles...");
+    
+    // Restore terminal state if was in raw mode
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+      } catch (e) {}
     }
     
-    // Attempt graceful close but don't hang for keep-alive connections
+    // Stop reading input to allow process to exit
+    process.stdin.pause();
+    
+    if (viteServer) {
+      viteServer.close().catch(() => {});
+    }
+    
     server.close(() => {
-      console.log("[Server] HTTP server closed. Goodbye!");
-      process.exit(0);
+      console.log("[Server] HTTP server stopped.");
     });
     
-    // In many environments, the server.close() callback might take too long
-    // due to idle keep-alive connections. We force exit after a short delay.
+    // Force exit after a tiny delay to ensure logs are flushed but port is freed
     setTimeout(() => {
-      console.log("[Server] Orderly shutdown complete (Forced).");
+      console.log("[Server] Process exiting. (PID: " + process.pid + ")");
       process.exit(0);
-    }, 500).unref();
+    }, 200).unref();
   };
+
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
 
   process.on('SIGINT', gracefulShutdown);
   process.on('SIGTERM', gracefulShutdown);
-  process.on('uncaughtException', (err) => {
-    console.error(`[Server] Uncaught Exception: ${err.message}`, err.stack);
+  process.on('uncaughtException', (err: Error) => {
+    console.error(`[Server] UNCAUGHT EXCEPTION: ${err.message}`, err.stack);
     process.exit(1);
   });
 
-  // Standard line-based input for "q" or "exit"
-  process.stdin.resume();
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (data: string) => {
-    const input = data.toString().trim().toLowerCase();
-    if (input === 'q' || input === 'exit' || input === 'stop') {
-      gracefulShutdown();
+  // Dual-mode input handling for best compatibility
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (key: string) => {
+        // ctrl-c (\u0003) or 'q'
+        if (key === '\u0003' || key.toLowerCase() === 'q') {
+          gracefulShutdown();
+        }
+      });
+      console.log("[Server] Interactive terminal detected. Press Ctrl+C or 'q' to stop.");
+    } catch (e) {
+      // Fallback
+      process.stdin.on('data', (data: string) => {
+        const input = data.toString().trim().toLowerCase();
+        if (input === 'q' || input === 'exit' || input === 'stop') {
+          gracefulShutdown();
+        }
+      });
     }
-  });
-  console.log("[Server] Press Ctrl+C or type 'q' + Enter to stop the server.");
+  } else {
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (data: string) => {
+      const input = data.toString().trim().toLowerCase();
+      if (input === 'q' || input === 'exit' || input === 'stop') {
+        gracefulShutdown();
+      }
+    });
+    console.log("[Server] Pipe mode detected. Type 'q' + Enter to stop.");
+  }
 
   // Background Queue Worker
   setInterval(async () => {
