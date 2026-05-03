@@ -437,7 +437,9 @@ async function downloadFile(url: string, destPath: string, onProgress: (progress
 
   const response = await fetch(url, { headers, signal });
   if (!response.ok && response.status !== 206) {
-    throw new Error(`Failed to download: ${response.status} ${response.statusText} from ${url}`);
+    let errText = response.statusText;
+    try { errText = await response.text(); } catch (e) {}
+    throw new Error(`Failed to download: ${response.status} ${response.statusText} from ${response.url} - ${errText}`);
   }
 
   let totalSize = Number(response.headers.get('content-length')) || 0;
@@ -1135,13 +1137,42 @@ async function startServer() {
     }
   });
 
-  app.post("/api/movie/:id/set-stream", (req, res) => {
+  app.post("/api/movie/:id/set-stream", async (req, res) => {
     const movieId = Number(req.params.id);
-    const { link, meta } = req.body;
+    let { link, meta } = req.body;
     const movie = db.find(m => m.id === movieId);
     if (!movie) return res.status(404).json({ error: "Movie not found" });
     
     if (!link) return res.status(400).json({ error: "Link is required" });
+
+    // Unroll ephemeral proxy URLs immediately before they expire
+    try {
+        if (link.includes('/api/v1/debrid/playback') || link.includes('/stream/')) {
+            console.log(`[Proxy Link] Unrolling proxy URL: ${link}`);
+            // Use GET with manual redirect to just fetch the Location header
+            const probeRes = await fetch(link, { 
+                method: 'GET', 
+                redirect: 'manual',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                    'Accept': '*/*'
+                }
+            });
+            if (probeRes.status >= 300 && probeRes.status < 400 && probeRes.headers.get('location')) {
+                const dest = probeRes.headers.get('location');
+                if (dest) {
+                    console.log(`[Proxy Link] Successfully unrolled to: ${dest}`);
+                    link = dest;
+                }
+            } else if (probeRes.ok) {
+                console.log(`[Proxy Link] URL returned 200 OK directly, keeping original link.`);
+            } else {
+                console.log(`[Proxy Link] Unexpected status ${probeRes.status} when unrolling.`);
+            }
+        }
+    } catch(err) {
+        console.error(`[Proxy Link] Failed to unroll link:`, err);
+    }
 
     movie.magnetLink = link;
     movie.upgradeMeta = meta;
