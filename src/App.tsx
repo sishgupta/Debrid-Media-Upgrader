@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, RefreshCw, Download, Trash2, Edit2, Play, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw } from 'lucide-react';
+import { Search, RefreshCw, Download, Trash2, Edit2, Play, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw, Ban, Terminal } from 'lucide-react';
 import axios from 'axios';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -72,6 +72,26 @@ export default function App() {
     theme: 'dark' as 'light' | 'dark' | 'system'
   });
   const [streamSelectorData, setStreamSelectorData] = useState<{movieId: number, streams: any[]} | null>(null);
+  const [showLogs, setShowLogs] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [isQueueActive, setIsQueueActive] = useState(false);
+
+  useEffect(() => {
+    let interval: any;
+    if (showLogs) {
+      const fetchLogs = async () => {
+        try {
+          const res = await axios.get('/api/logs');
+          setLogs(res.data.logs);
+        } catch (err) {
+          console.error(err);
+        }
+      };
+      fetchLogs();
+      interval = setInterval(fetchLogs, 2000);
+    }
+    return () => clearInterval(interval);
+  }, [showLogs]);
 
   // Fetch movies
   const fetchMovies = async () => {
@@ -125,15 +145,35 @@ export default function App() {
     };
   }, [settingsForm.theme]);
 
+  // Queue Manager Effect
+  useEffect(() => {
+    if (!isQueueActive) return;
+
+    const readyMovies = movies.filter(m => m.status === 'magnet_found');
+    const isAnyUpgrading = movies.some(m => m.status === 'upgrading');
+
+    // If queue is empty and nothing is upgrading, we're done
+    if (readyMovies.length === 0 && !isAnyUpgrading) {
+      setIsQueueActive(false);
+      return;
+    }
+
+    // Process next in queue if nothing is currently upgrading
+    if (!isAnyUpgrading && readyMovies.length > 0) {
+      const nextMovie = readyMovies[0];
+      handleUpgrade(nextMovie.id);
+    }
+  }, [movies, isQueueActive]);
+
   // Polling for background tasks
   useEffect(() => {
     const hasTransitionalMovies = movies.some(m => ['fetching_metadata', 'upgrading'].includes(m.status));
     
-    if (hasTransitionalMovies) {
+    if (hasTransitionalMovies || isQueueActive) {
       const interval = setInterval(fetchMovies, 3000);
       return () => clearInterval(interval);
     }
-  }, [movies]);
+  }, [movies, isQueueActive]);
 
   const handleGenerateMocks = async () => {
     try {
@@ -201,6 +241,15 @@ export default function App() {
     }
   };
 
+  const cancelUpgrade = async (movieId: number) => {
+    try {
+      await axios.post('/api/cancel-upgrade', { movieId });
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error canceling upgrade");
+    }
+  };
+
   const handleAcceptUpgrade = async (movieId: number) => {
     try {
       await axios.post(`/api/movie/${movieId}/accept-upgrade`);
@@ -219,31 +268,10 @@ export default function App() {
     }
   };
 
-  const handleUpgradeAll = async () => {
+  const handleUpgradeAll = () => {
     const readyMovies = movies.filter(m => m.status === 'magnet_found');
-    if (readyMovies.length === 0) return;
-    
-    for (const movie of readyMovies) {
-      try {
-        await axios.post('/api/upgrade', { movieId: movie.id });
-        await fetchMovies();
-        
-        // poll until it stops upgrading, simulating waiting for the download
-        let isUpgrading = true;
-        while (isUpgrading) {
-          await new Promise(r => setTimeout(r, 1000));
-          const res = await axios.get('/api/movies');
-          setMovies(res.data);
-          const currentMovie = res.data.find((m: Movie) => m.id === movie.id);
-          if (currentMovie && currentMovie.status !== 'upgrading') {
-            isUpgrading = false;
-          }
-        }
-      } catch (e: any) {
-        console.error("Failed upgrading movie id " + movie.id, e);
-        alert(e.response?.data?.error || e.message || "Error upgrading movie");
-      }
-    }
+    if (readyMovies.length === 0 && !isQueueActive) return;
+    setIsQueueActive(!isQueueActive);
   };
 
   const handleDelete = async (movie: Movie) => {
@@ -400,6 +428,14 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 md:gap-4">
             <button 
+              onClick={() => setShowLogs(true)}
+              className="flex items-center justify-center p-2.5 sm:px-3 sm:py-2 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border border-slate-200 dark:border-slate-700/50 rounded-md font-medium transition-colors shadow-sm min-w-[44px] min-h-[44px]"
+              title="System Logs"
+            >
+              <Terminal className="w-5 h-5" />
+              <span className="hidden lg:inline ml-2">Logs</span>
+            </button>
+            <button 
               onClick={() => setShowSettings(true)}
               className="flex items-center justify-center p-2.5 sm:px-3 sm:py-2 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border border-slate-200 dark:border-slate-700/50 rounded-md font-medium transition-colors shadow-sm min-w-[44px] min-h-[44px]"
               title="Settings"
@@ -417,10 +453,24 @@ export default function App() {
             </button>
             <button 
               onClick={handleUpgradeAll} 
-              className="hidden md:flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-md font-medium transition-colors shadow-sm"
+              className={cn(
+                "hidden md:flex items-center gap-2 px-4 py-2 rounded-md font-medium transition-all shadow-sm border",
+                isQueueActive 
+                  ? "bg-amber-500 hover:bg-amber-600 text-white border-amber-600 animate-pulse" 
+                  : "bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700"
+              )}
             >
-              <Download className="w-4 h-4" />
-              Upgrade All Ready
+              {isQueueActive ? (
+                <>
+                  <RotateCcw className="w-4 h-4 animate-spin" />
+                  Processing Queue ({movies.filter(m => m.status === 'magnet_found').length} left)
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  Upgrade All Ready
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -550,7 +600,7 @@ export default function App() {
                     ) : '-'}
                   </td>
                   <td className="px-4 py-3">
-                    <StatusBadge movie={movie} />
+                    <StatusBadge movie={movie} onCancel={() => cancelUpgrade(movie.id)} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -961,11 +1011,72 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Log Viewer Modal */}
+      {showLogs && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl w-full max-w-4xl max-h-[80vh] flex flex-col border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in duration-200">
+            <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
+                <Terminal className="w-5 h-5" />
+                <h2 className="text-lg font-semibold tracking-tight">System Logs</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => setLogs([])}
+                  className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                  title="Clear Local View"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={() => setShowLogs(false)}
+                  className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 bg-slate-950 font-mono text-[11px] sm:text-xs leading-relaxed">
+              {logs.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-slate-600">
+                  <p>No log entries found. Waiting for output...</p>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {logs.map((log, i) => {
+                    const isError = log.includes('[ERROR]');
+                    const isWarn = log.includes('[WARN]');
+                    return (
+                      <div key={i} className={cn(
+                        "whitespace-pre-wrap break-all",
+                        isError ? "text-red-400" : isWarn ? "text-yellow-400" : "text-emerald-400/90"
+                      )}>
+                        <span className="text-slate-600 mr-2 opacity-50">{log.substring(0, 21)}</span>
+                        {log.substring(21)}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            
+            <div className="p-3 bg-slate-50 dark:bg-slate-900/50 border-t border-slate-100 dark:border-slate-800 text-[10px] text-slate-500 flex justify-between items-center">
+              <span>Showing last {logs.length} entries</span>
+              <span className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                Live Update
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function StatusBadge({ movie }: { movie: Movie }) {
+function StatusBadge({ movie, onCancel }: { movie: Movie, onCancel?: () => void }) {
   switch (movie.status) {
     case 'fetching_metadata':
       return <span className="text-xs px-2 py-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500 border border-yellow-500/20 flex w-max items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin"/> Fetching Info</span>;
@@ -979,9 +1090,21 @@ function StatusBadge({ movie }: { movie: Movie }) {
     case 'upgrading':
       return (
         <div className="flex flex-col gap-1.5 w-32">
-          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-wider flex justify-between">
+          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-wider flex justify-between items-center">
             <span>Upgrading</span>
-            <span>{movie.progress || 0}%</span>
+            <div className="flex items-center gap-1.5">
+              <span>{movie.progress || 0}%</span>
+              <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCancel?.();
+                }}
+                className="hover:text-red-500 transition-colors cursor-pointer"
+                title="Cancel Upgrade"
+              >
+                <Ban className="w-3 h-3" />
+              </button>
+            </div>
           </span>
           <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-1 overflow-hidden shadow-inner">
             <div 

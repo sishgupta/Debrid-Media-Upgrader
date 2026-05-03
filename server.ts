@@ -9,6 +9,35 @@ ffmpeg.setFfprobePath(ffprobeStatic.path);
 
 const PORT = 3000;
 const DB_PATH = path.join(process.cwd(), "media_library.json");
+
+// Internal log buffer
+const LOGS: string[] = [];
+const MAX_LOGS = 200;
+
+function logToBuffer(level: string, message: string) {
+  const timestamp = new Date().toISOString();
+  const entry = `[${timestamp}] [${level}] ${message}`;
+  LOGS.push(entry);
+  if (LOGS.length > MAX_LOGS) LOGS.shift();
+}
+
+// Override console methods to capture logs
+const originalLog = console.log;
+const originalWarn = console.warn;
+const originalError = console.error;
+
+console.log = (...args: any[]) => {
+  originalLog(...args);
+  logToBuffer('INFO', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+console.warn = (...args: any[]) => {
+  originalWarn(...args);
+  logToBuffer('WARN', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+console.error = (...args: any[]) => {
+  originalError(...args);
+  logToBuffer('ERROR', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
 const SETTINGS_PATH = path.join(process.cwd(), "settings.json");
 
 interface AppSettings {
@@ -163,8 +192,11 @@ function deleteCompanionSubtitles(videoPath: string) {
 }
 
 // Helper to download a file with progress reporting
-async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void): Promise<void> {
-  const response = await fetch(url);
+// Registry for active downloads to allow cancellation
+const activeDownloads = new Map<number, AbortController>();
+
+async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void, signal: AbortSignal): Promise<void> {
+  const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(`Failed to download: ${response.statusText}`);
   }
@@ -189,9 +221,12 @@ async function downloadFile(url: string, destPath: string, onProgress: (progress
         onProgress(progress);
       }
     }
+  } catch (err) {
+    writer.destroy();
+    if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+    throw err;
   } finally {
     writer.end();
-    // Return a promise that resolves when the writer is finished
     await new Promise<void>((resolve, reject) => {
       writer.on('finish', () => resolve());
       writer.on('error', (err) => reject(err));
@@ -464,6 +499,10 @@ async function startServer() {
     } catch (e) {
       res.status(500).json({ error: String(e) });
     }
+  });
+
+  app.get("/api/logs", (req, res) => {
+    res.json({ logs: LOGS });
   });
 
   app.get("/api/movies", async (req, res) => {
@@ -783,16 +822,69 @@ async function startServer() {
         movie.progress = 0;
         saveDb();
         
-        console.log(`[Upgrade] Starting upgrade process for "${movie.movieName}"`);
-        console.log(`[Upgrade] SOURCE LINK: ${movie.magnetLink || 'N/A'}`);
-        
+        const isMock = movie.filePath.startsWith(MOCK_DIR);
+
+        if (isMock) {
+          // --- SIMULATION MODE ---
+          console.log(`[Upgrade] SIMULATING upgrade for MOCK movie "${movie.movieName}"`);
+          let currentProgress = 0;
+          const interval = setInterval(() => {
+            const m = db.find(x => x.id === Number(movieId));
+            if (!m || m.status !== 'upgrading') {
+              clearInterval(interval);
+              return;
+            }
+
+            currentProgress += Math.floor(Math.random() * 15) + 10;
+            if (currentProgress >= 100) {
+              currentProgress = 100;
+              m.status = 'upgraded';
+              m.progress = 100;
+              
+              const oldPath = m.filePath;
+              const parentDir = path.dirname(oldPath);
+              const extension = movie.upgradeMeta?.extension || m.ext || '.mkv';
+              const nameSegments = [m.movieName];
+              if (m.year) nameSegments.push(`(${m.year})`);
+              const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
+              const finalPath = path.join(parentDir, finalFileName);
+
+              try {
+                if (fs.existsSync(oldPath)) fs.renameSync(oldPath, oldPath + '.bak');
+                fs.writeFileSync(finalPath, "upgraded mock data");
+                m.filePath = finalPath;
+                m.fileName = finalFileName;
+                m.ext = extension;
+                m.status = 'verifying_upgrade';
+                
+                m.resolution = '3840x2160';
+                m.bitrate = 65000000;
+                m.hdr = true;
+                m.fileSize = 45000000000;
+              } catch (e) {}
+
+              m.magnetLink = null;
+              m.upgradeMeta = undefined;
+              saveDb();
+              clearInterval(interval);
+            } else {
+              m.progress = currentProgress;
+              saveDb();
+            }
+          }, 300);
+          return res.json({ success: true, message: "Mock upgrade simulation started" });
+        }
+
+        // --- REAL MODE ---
         if (!movie.magnetLink) {
            movie.status = 'indexed';
            saveDb();
            return res.status(400).json({ error: "No magnet link/download URL found" });
         }
 
-        // Run download in background
+        const controller = new AbortController();
+        activeDownloads.set(movie.id, controller);
+
         (async () => {
           try {
             const oldPath = movie.filePath;
@@ -805,51 +897,31 @@ async function startServer() {
               : `download_staging_${movie.id}.tmp`;
             const stagingPath = path.join(parentDir, stagingFileName);
 
-            // REAL DOWNLOAD
-            console.log(`[Upgrade] Downloading to staging: ${stagingPath}`);
+            console.log(`[Upgrade] REAL Download starting for "${movie.movieName}"`);
             await downloadFile(movie.magnetLink!, stagingPath, (p) => {
               movie.progress = p;
-              // Throttle DB saves a bit? every 5%?
               if (p % 5 === 0) saveDb();
-            });
+            }, controller.signal);
 
-            console.log(`[Upgrade] Download complete for "${movie.movieName}"`);
+            activeDownloads.delete(movie.id);
 
-            // Standard naming for final destination: "Movie Title (Year).ext"
             const nameSegments = [movie.movieName];
             if (movie.year) nameSegments.push(`(${movie.year})`);
             const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
             const finalPath = path.join(parentDir, finalFileName);
 
-            // 1. Delete companion subtitles for the old file
             deleteCompanionSubtitles(oldPath);
 
-            // 2. Backup the old file
             if (fs.existsSync(oldPath)) {
-              // Ensure we don't overwrite an existing backup if multiple upgrades fail
               let backupPath = oldPath + '.bak';
-              if (fs.existsSync(backupPath)) {
-                backupPath = oldPath + '.' + Date.now() + '.bak';
-              }
+              if (fs.existsSync(backupPath)) backupPath = oldPath + '.' + Date.now() + '.bak';
               fs.renameSync(oldPath, backupPath);
               movie.oldFilePath = backupPath;
-              movie.oldMeta = {
-                resolution: movie.resolution,
-                bitrate: movie.bitrate,
-                fileSize: movie.fileSize,
-                hdr: movie.hdr
-              };
-              console.log(`[Upgrade] Backed up old version to: ${backupPath}`);
+              movie.oldMeta = { resolution: movie.resolution, bitrate: movie.bitrate, fileSize: movie.fileSize, hdr: movie.hdr };
             }
             
-            // 3. Move from staging to final location
-            if (fs.existsSync(finalPath) && finalPath !== oldPath) {
-               // If there's a file already at finalPath (unlikely due to sanitization but possible), 
-               // we should probably rename it too or overwrite.
-               fs.unlinkSync(finalPath);
-            }
+            if (fs.existsSync(finalPath) && finalPath !== oldPath) fs.unlinkSync(finalPath);
             fs.renameSync(stagingPath, finalPath);
-            console.log(`[Upgrade] Finalized upgrade: ${stagingPath} -> ${finalPath}`);
 
             movie.filePath = finalPath;
             movie.fileName = finalFileName;
@@ -857,7 +929,6 @@ async function startServer() {
             movie.status = 'verifying_upgrade';
             movie.progress = 100;
 
-            // Re-scan metadata for validation
             try {
               const meta = await getMediaMetadata(movie.filePath);
               const stat = fs.statSync(movie.filePath);
@@ -865,17 +936,20 @@ async function startServer() {
               movie.bitrate = meta.bitrate;
               movie.hdr = meta.hdr;
               movie.fileSize = stat.size;
-            } catch (e) {
-              console.error("[Upgrade] Re-scan failed", e);
-            }
+            } catch (e) {}
             
             movie.magnetLink = null;
             movie.upgradeMeta = undefined;
             saveDb();
 
           } catch (err: any) {
-            console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
-            movie.status = 'indexed'; // Revert status so user can try again
+            activeDownloads.delete(movie.id);
+            if (err.name === 'AbortError') {
+              console.log(`[Upgrade] CANCELED upgrade for "${movie.movieName}"`);
+            } else {
+              console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
+            }
+            movie.status = 'indexed';
             movie.progress = 0;
             saveDb();
           }
@@ -886,6 +960,25 @@ async function startServer() {
       res.status(404).json({ error: "Movie not found or already upgrading" });
     } catch (error) {
        res.status(500).json({ error: String(error) });
+    }
+  });
+
+  app.post("/api/cancel-upgrade", (req, res) => {
+    const { movieId } = req.body;
+    const controller = activeDownloads.get(Number(movieId));
+    if (controller) {
+      controller.abort();
+      res.json({ success: true, message: "Download cancellation sent" });
+    } else {
+      const movie = db.find(m => m.id === Number(movieId));
+      if (movie && movie.status === 'upgrading') {
+        movie.status = 'indexed';
+        movie.progress = 0;
+        saveDb();
+        res.json({ success: true, message: "Simulation canceled" });
+      } else {
+        res.status(404).json({ error: "No active download found" });
+      }
     }
   });
 
