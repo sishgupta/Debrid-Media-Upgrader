@@ -51,19 +51,7 @@ console.error = (...args: any[]) => {
   logToBuffer('ERROR', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
 };
 
-process.on('SIGINT', () => {
-    console.log("[Server] Exiting: SIGINT received.");
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    console.log("[Server] Exiting: SIGTERM received.");
-    process.exit(0);
-});
-process.on('uncaughtException', (err) => {
-    console.error(`[Server] Uncaught Exception: ${err.message}`, err.stack);
-    process.exit(1);
-});
-
+// Removed redundant global signal handlers to consolidate at the end of the file
 console.log("[Server] Server application starting.");
 const SETTINGS_PATH = path.join(process.cwd(), "settings.json");
 
@@ -1587,24 +1575,42 @@ async function startServer() {
   });
 
   const gracefulShutdown = () => {
-    console.log("Shutting down cleanly...");
+    console.log("\n[Server] Shutting down cleanly...");
     if (viteServer) {
       viteServer.close().catch(console.error);
     }
     server.close(() => {
-      console.log("HTTP server closed.");
+      console.log("[Server] HTTP server closed. Goodbye!");
       process.exit(0);
     });
     
-    // Force exit if keeping alive too long
+    // Force exit if keeping alive too long (e.g. hanging connections)
     setTimeout(() => {
-      console.error("Forcing shutdown...");
+      console.error("[Server] Clean shutdown timed out. Forcing exit.");
       process.exit(1);
-    }, 5000).unref();
+    }, 2000).unref();
   };
 
   process.on('SIGINT', gracefulShutdown);
   process.on('SIGTERM', gracefulShutdown);
+  process.on('uncaughtException', (err) => {
+    console.error(`[Server] Uncaught Exception: ${err.message}`, err.stack);
+    process.exit(1);
+  });
+
+  // If running in an interactive terminal, allow 'q' or 'ctrl+c' character to exit
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (key: string) => {
+      // ctrl-c ( unicode \u0003 ) or 'q'
+      if (key === '\u0003' || key.toLowerCase() === 'q') {
+        gracefulShutdown();
+      }
+    });
+    console.log("[Server] Press Ctrl+C or 'q' to stop the server.");
+  }
 
   // Background Queue Worker
   setInterval(async () => {
