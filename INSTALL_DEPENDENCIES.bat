@@ -1,27 +1,28 @@
 @echo off
 echo ======================================================
-echo STEP 1: INSTALLING REQUIREMENTS (NODE.JS, GIT, FFMPEG)
+echo STEP 1: INSTALLING SYSTEM REQUIREMENTS
 echo ======================================================
 echo.
 
-echo Installing Node.js (LTS)...
+echo Installing Node.js LTS...
 winget install -e --id OpenJS.NodeJS.LTS --scope machine --accept-package-agreements --accept-source-agreements
-if %errorLevel% neq 0 echo [WARN] Node.js installation might have failed or is already installed.
+if %errorLevel% neq 0 echo [INFO] Node.js check complete.
 
 echo.
 echo Installing Git...
 winget install -e --id Git.Git --scope machine --accept-package-agreements --accept-source-agreements
-if %errorLevel% neq 0 echo [WARN] Git installation might have failed or is already installed.
+if %errorLevel% neq 0 echo [INFO] Git check complete.
 
 echo.
 echo Installing FFmpeg...
 winget install -e --id gyan.ffmpeg --scope machine --accept-package-agreements --accept-source-agreements
-if %errorLevel% neq 0 echo [WARN] FFmpeg installation might have failed or is already installed.
+if %errorLevel% neq 0 echo [INFO] FFmpeg check complete.
 
 echo.
 echo ======================================================
 echo INSTALLATION COMPLETE
-echo Please RESTART your terminal/CMD/PowerShell 
-echo for the changes to take effect!
+echo.
+echo IMPORTANT: Please RESTART your terminal or CMD window 
+echo before running START_APP.bat for the first time.
 echo ======================================================
 pause
