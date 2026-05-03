@@ -175,8 +175,10 @@ export default function App() {
   const handleGenerateMocks = async () => {
     try {
       setModalLoading(true);
-      await axios.post('/api/generate-mocks');
-      alert("Mock files generated successfully. Click 'Scan Directory' to see them.");
+      const res = await axios.post('/api/generate-mocks');
+      alert(res.data.message || "Mock files generated successfully.");
+      fetchMovies();
+      fetchSettings(); // Update target folder if it changed
     } catch (e: any) {
       alert(e.response?.data?.error || "Error generating mocks");
     } finally {

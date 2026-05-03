@@ -179,6 +179,10 @@ function loadDb() {
       }
       let dbChanged = false;
       for (const movie of db) {
+        if (!movie.fileName) {
+          movie.fileName = path.basename(movie.filePath);
+          dbChanged = true;
+        }
         if (movie.status === 'upgrading') {
           movie.status = 'paused';
           dbChanged = true;
@@ -223,6 +227,32 @@ function deleteCompanionSubtitles(videoPath: string) {
   } catch (e) {
     console.error("Error deleting companion subtitles:", e);
   }
+}
+
+// Helper to generate a clean staging file name
+function getStagingFileName(movie: Movie): string {
+  let tempFileName = "";
+  if (movie.magnetLink) {
+    try {
+      const u = new URL(movie.magnetLink);
+      let pathname = decodeURIComponent(u.pathname);
+      // Remove trailing slash if any
+      if (pathname.endsWith('/')) {
+        pathname = pathname.substring(0, pathname.length - 1);
+      }
+      const basename = path.basename(pathname);
+      if (basename) {
+         tempFileName = sanitizeFileName(basename) + ".tmp";
+      }
+    } catch (e) {}
+  }
+  if (!tempFileName && movie.upgradeMeta?.filename) {
+    tempFileName = `${sanitizeFileName(movie.upgradeMeta.filename)}.tmp`;
+  }
+  if (!tempFileName) {
+    tempFileName = `download_staging_${movie.id}.tmp`;
+  }
+  return tempFileName;
 }
 
 // Helper to download a file with progress reporting
@@ -313,10 +343,7 @@ async function runUpgrade(movieId: number) {
     const parentDir = path.dirname(oldPath);
     const extension = movie.upgradeMeta?.extension || movie.ext || path.extname(oldPath) || '.mkv';
     
-    const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
-    const stagingFileName = baseFileName 
-      ? `${sanitizeFileName(baseFileName)}.tmp` 
-      : `download_staging_${movie.id}.tmp`;
+    const stagingFileName = getStagingFileName(movie);
     const stagingPath = path.join(parentDir, stagingFileName);
 
     console.log(`[Upgrade] REAL Download starting for "${movie.movieName}"`);
@@ -379,10 +406,7 @@ async function runUpgrade(movieId: number) {
       
       const oldPath = movie.filePath;
       const parentDir = path.dirname(oldPath);
-      const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
-      const stagingFileName = baseFileName 
-        ? `${sanitizeFileName(baseFileName)}.tmp` 
-        : `download_staging_${movie.id}.tmp`;
+      const stagingFileName = getStagingFileName(movie);
       const stagingPath = path.join(parentDir, stagingFileName);
       try { if (fs.existsSync(stagingPath)) fs.unlinkSync(stagingPath); } catch(e) {}
       
@@ -1008,7 +1032,43 @@ async function startServer() {
       createMockMediaFiles();
       // Automatically switch the user's focus to the mock folder so they can see the results
       saveSettings({ targetFolder: MOCK_DIR });
-      res.json({ success: true, message: "Mock files generated in ./mock_media and settings updated." });
+      
+      // Auto-scan the mock directory right away
+      const files = fs.readdirSync(MOCK_DIR);
+      let newCount = 0;
+      files.forEach(file => {
+        const filePath = path.join(MOCK_DIR, file);
+        if (fs.statSync(filePath).isFile()) {
+           const existing = db.find(m => m.filePath === filePath);
+           if (!existing) {
+             let movieName = file.replace(/\(.*\)/g, '').replace(/\.[^/.]+$/, "").replace(/\./g, ' ').trim();
+             let yearMatch = file.match(/\((\d{4})\)/);
+             let year = yearMatch ? yearMatch[1] : undefined;
+             let ext = path.extname(file);
+             
+             db.push({
+               id: nextId,
+               fileName: file,
+               movieName,
+               year,
+               filePath,
+               fileSize: fs.statSync(filePath).size,
+               resolution: '1920x1080',
+               bitrate: 5000000,
+               hdr: false,
+               ext,
+               magnetLink: null,
+               status: 'indexed',
+               imdbId: null
+             });
+             nextId++;
+             newCount++;
+           }
+        }
+      });
+      saveDb();
+
+      res.json({ success: true, message: `Mock files generated and ${newCount} items scanned into library.` });
     } catch (e) {
       res.status(500).json({ error: String(e) });
     }
@@ -1173,10 +1233,7 @@ async function startServer() {
         // Remove temp file
         const oldPath = movie.filePath;
         const parentDir = path.dirname(oldPath);
-        const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
-        const stagingFileName = baseFileName 
-          ? `${sanitizeFileName(baseFileName)}.tmp` 
-          : `download_staging_${movie.id}.tmp`;
+        const stagingFileName = getStagingFileName(movie);
         const stagingPath = path.join(parentDir, stagingFileName);
         try { if (fs.existsSync(stagingPath)) fs.unlinkSync(stagingPath); } catch(e) {}
         
@@ -1325,13 +1382,14 @@ async function startServer() {
     }
   });
 
+  let viteServer: any;
   // Vite integration
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    viteServer = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
-    app.use(vite.middlewares);
+    app.use(viteServer.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
@@ -1340,9 +1398,29 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  const gracefulShutdown = () => {
+    console.log("Shutting down cleanly...");
+    if (viteServer) {
+      viteServer.close().catch(console.error);
+    }
+    server.close(() => {
+      console.log("HTTP server closed.");
+      process.exit(0);
+    });
+    
+    // Force exit if keeping alive too long
+    setTimeout(() => {
+      console.error("Forcing shutdown...");
+      process.exit(1);
+    }, 5000).unref();
+  };
+
+  process.on('SIGINT', gracefulShutdown);
+  process.on('SIGTERM', gracefulShutdown);
 
   // Background Queue Worker
   setInterval(async () => {
