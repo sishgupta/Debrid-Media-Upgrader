@@ -268,66 +268,9 @@ async function runUpgrade(movieId: number) {
   }
   saveDb();
   
-  const isMock = movie.filePath.startsWith(MOCK_DIR);
+  const isMock = movie.filePath.startsWith(MOCK_DIR) || (movie.upgradeMeta?.filename && movie.upgradeMeta.filename.includes('mock'));
 
-  if (isMock) {
-    // --- SIMULATION MODE ---
-    console.log(`[Upgrade] SIMULATING upgrade for MOCK movie "${movie.movieName}"`);
-    let currentProgress = movie.progress || 0;
-    const interval = setInterval(() => {
-      const m = db.find(x => x.id === Number(movieId));
-      if (!m || m.status !== 'upgrading') {
-        clearInterval(interval);
-        return;
-      }
-
-      currentProgress += Math.floor(Math.random() * 15) + 10;
-      if (currentProgress >= 100) {
-        currentProgress = 100;
-        m.status = 'upgraded';
-        m.progress = 100;
-        
-        const oldPath = m.filePath;
-        const parentDir = path.dirname(oldPath);
-        const extension = movie.upgradeMeta?.extension || m.ext || '.mkv';
-        const nameSegments = [m.movieName];
-        if (m.year) nameSegments.push(`(${m.year})`);
-        const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
-        const finalPath = path.join(parentDir, finalFileName);
-
-        try {
-          if (fs.existsSync(oldPath)) {
-            const backupPath = oldPath + '.bak';
-            fs.renameSync(oldPath, backupPath);
-            m.oldFilePath = backupPath;
-            m.oldMeta = { resolution: m.resolution, bitrate: m.bitrate, fileSize: m.fileSize, hdr: m.hdr };
-          }
-          fs.writeFileSync(finalPath, "upgraded mock data");
-          m.filePath = finalPath;
-          m.fileName = finalFileName;
-          m.ext = extension;
-          m.status = 'verifying_upgrade';
-          
-          m.resolution = '3840x2160';
-          m.bitrate = 65000000;
-          m.hdr = true;
-          m.fileSize = 45000000000;
-        } catch (e) {}
-
-        m.magnetLink = null;
-        m.upgradeMeta = undefined;
-        saveDb();
-        clearInterval(interval);
-      } else {
-        m.progress = currentProgress;
-        saveDb();
-      }
-    }, 300);
-    return;
-  }
-
-  // --- REAL MODE ---
-  if (!movie.magnetLink) {
+  if (!movie.magnetLink && !isMock) {
      movie.status = 'indexed';
      saveDb();
      return;
@@ -344,13 +287,13 @@ async function runUpgrade(movieId: number) {
     const stagingFileName = getStagingFileName(movie);
     const stagingPath = path.join(parentDir, stagingFileName);
 
-    console.log(`[Upgrade] REAL Download starting for "${movie.movieName}"`);
-    await downloadFile(movie.magnetLink!, stagingPath, (p) => {
+    console.log(`[Upgrade] ${isMock ? 'SIMULATED' : 'REAL'} Download starting for "${movie.movieName}"`);
+    
+    // Call downloadFile which now handles both real and mock
+    await downloadFile(movie.magnetLink || "mock-link", stagingPath, (p) => {
       movie.progress = p;
       if (p % 5 === 0) saveDb();
-    }, controller.signal);
-
-    activeDownloads.delete(movie.id);
+    }, controller.signal, isMock);
 
     const nameSegments = [movie.movieName];
     if (movie.year) nameSegments.push(`(${movie.year})`);
@@ -376,21 +319,28 @@ async function runUpgrade(movieId: number) {
     movie.status = 'verifying_upgrade';
     movie.progress = 100;
 
-    try {
-      const meta = await getMediaMetadata(movie.filePath);
-      const stat = fs.statSync(movie.filePath);
-      movie.resolution = meta.resolution;
-      movie.bitrate = meta.bitrate;
-      movie.hdr = meta.hdr;
-      movie.fileSize = stat.size;
-    } catch (e) {}
+    if (isMock) {
+      // For mocks, we simulate high-quality metadata so the test looks realistic
+      movie.resolution = '3840x2160';
+      movie.bitrate = 65000000;
+      movie.hdr = true;
+      movie.fileSize = 45000000000;
+    } else {
+      try {
+        const meta = await getMediaMetadata(movie.filePath);
+        const stat = fs.statSync(movie.filePath);
+        movie.resolution = meta.resolution;
+        movie.bitrate = meta.bitrate;
+        movie.hdr = meta.hdr;
+        movie.fileSize = stat.size;
+      } catch (e) {}
+    }
     
     movie.magnetLink = null;
     movie.upgradeMeta = undefined;
     saveDb();
 
   } catch (err: any) {
-    activeDownloads.delete(movie.id);
     const abortReason = err.target?.reason || err.reason || 'canceled';
     if (err.name === 'AbortError' && abortReason === 'paused') {
       console.log(`[Upgrade] PAUSED upgrade for "${movie.movieName}"`);
@@ -411,15 +361,44 @@ async function runUpgrade(movieId: number) {
       saveDb();
     } else {
       console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err?.message || err, err?.stack);
-      // Wait, failure could be temporary, let's just 'pause' it or put it in an error state we can resume.
-      // Easiest is just to log it and allow resume by setting to paused.
-      movie.status = 'paused'; 
+      // If we haven't made any progress, don't leave it in 'paused', revert to 'magnet_found'
+      if ((movie.progress || 0) < 1) {
+        movie.status = 'magnet_found';
+        movie.progress = 0;
+      } else {
+        movie.status = 'paused'; 
+      }
       saveDb();
     }
+  } finally {
+    activeDownloads.delete(Number(movieId));
   }
 }
-async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void, signal: AbortSignal): Promise<void> {
+async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void, signal: AbortSignal, isMock = false): Promise<void> {
 
+  if (isMock) {
+    // --- SIMULATION PATH ---
+    // Start from current progress if resuming
+    let startProgress = 0;
+    if (fs.existsSync(destPath)) {
+      // We don't have total size here normally but we can guess or just start from 50
+      startProgress = 50; 
+    }
+    
+    for (let p = startProgress; p <= 100; p += 10) {
+      if (signal.aborted) {
+        throw new Error('AbortError');
+      }
+      onProgress(p);
+      await new Promise(r => setTimeout(r, 400));
+    }
+    
+    // Write the mock file at the very end
+    fs.writeFileSync(destPath, "MOCK UPGRADED VIDEO CONTENT");
+    return;
+  }
+
+  // --- REAL DOWNLOAD PATH ---
   let existingSize = 0;
   if (fs.existsSync(destPath)) {
     existingSize = fs.statSync(destPath).size;
@@ -433,73 +412,85 @@ async function downloadFile(url: string, destPath: string, onProgress: (progress
     headers['Range'] = `bytes=${existingSize}-`;
   }
 
-  const response = await fetch(url, { headers, signal });
+  // Set a timeout for the initial connection phase
+  const fetchController = new AbortController();
+  const internalSignal = fetchController.signal;
   
-  // Detect if we were redirected to a placeholder video (common in some Stremio/Debrid setups)
-  const finalUrl = response.url.toLowerCase();
-  if (finalUrl.includes('downloading.mp4') || finalUrl.includes('placeholder.mp4')) {
-    throw new Error(`Redirected to a placeholder video: ${response.url}. The stream may still be caching or resolution failed.`);
-  }
-
-  if (!response.ok && response.status !== 206) {
-    let errText = response.statusText;
-    try { errText = await response.text(); } catch (e) {}
-    throw new Error(`Failed to download: ${response.status} ${response.statusText} from ${response.url} - ${errText}`);
-  }
-
-  let totalSize = Number(response.headers.get('content-length')) || 0;
-  let isResuming = response.status === 206;
+  // Link the external signal to our internal one
+  const onAbort = () => fetchController.abort();
+  signal.addEventListener('abort', onAbort);
   
-  if (isResuming) {
-    const contentRange = response.headers.get('content-range');
-    if (contentRange) {
-        const match = contentRange.match(/\/(\d+)$/);
-        if (match) totalSize = Number(match[1]);
-    } else {
-        totalSize += existingSize;
-    }
-  } else if (existingSize > 0) {
-      // Server did not support range, start from zero
-      existingSize = 0; 
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("Could not get reader from response body");
-
-  const writer = fs.createWriteStream(destPath, { flags: isResuming ? 'a' : 'w' });
-  let downloadedSize = existingSize;
+  const timeoutId = setTimeout(() => {
+    fetchController.abort("timeout");
+  }, 30000); // 30 second timeout for initial headers
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      writer.write(value);
-      downloadedSize += value.length;
-      
-      if (totalSize > 0) {
-        const progress = Math.round((downloadedSize / totalSize) * 100);
-        onProgress(Math.min(progress, 99)); // Keep at 99 until truly done
-      }
-    }
+    const response = await fetch(url, { headers, signal: internalSignal });
+    clearTimeout(timeoutId);
     
-    // Server exit handle or power outage handle
-    // On process exit, the stream might abrupt or the reader might throw an error.
-    if (totalSize > 0 && downloadedSize < totalSize) {
-       console.warn(`[Download] Incomplete download. Expected ${totalSize}, got ${downloadedSize}`);
-       throw new Error("Incomplete download");
+    // Detect if we were redirected to a placeholder video
+    const finalUrl = response.url.toLowerCase();
+    if (finalUrl.includes('downloading.mp4') || finalUrl.includes('placeholder.mp4')) {
+      throw new Error(`Redirected to a placeholder video: ${response.url}. The stream may still be caching.`);
     }
 
-  } catch (err) {
-    writer.destroy();
-    // we do not unlink destPath here anymore because we want to be able to resume
-    throw err;
+    if (!response.ok && response.status !== 206) {
+      let errText = response.statusText;
+      try { errText = await response.text(); } catch (e) {}
+      throw new Error(`Failed to download: ${response.status} ${response.statusText} from ${response.url} - ${errText}`);
+    }
+
+    let totalSize = Number(response.headers.get('content-length')) || 0;
+    let isResuming = response.status === 206;
+    
+    if (isResuming) {
+      const contentRange = response.headers.get('content-range');
+      if (contentRange) {
+          const match = contentRange.match(/\/(\d+)$/);
+          if (match) totalSize = Number(match[1]);
+      } else {
+          totalSize += existingSize;
+      }
+    } else if (existingSize > 0) {
+        existingSize = 0; 
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Could not get reader from response body stream");
+
+    const writer = fs.createWriteStream(destPath, { flags: isResuming ? 'a' : 'w' });
+    let downloadedSize = existingSize;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        writer.write(value);
+        downloadedSize += value.length;
+        
+        if (totalSize > 0) {
+          const progress = Math.round((downloadedSize / totalSize) * 100);
+          onProgress(Math.min(progress, 99));
+        }
+      }
+      
+      if (totalSize > 0 && downloadedSize < totalSize) {
+         throw new Error("Incomplete download");
+      }
+    } catch (err) {
+      writer.destroy();
+      throw err;
+    } finally {
+      writer.end();
+      await new Promise<void>((resolve) => {
+        writer.on('finish', () => resolve());
+        writer.on('error', () => resolve());
+      });
+    }
   } finally {
-    writer.end();
-    await new Promise<void>((resolve, reject) => {
-      writer.on('finish', () => resolve());
-      writer.on('error', (err) => reject(err));
-    });
+    clearTimeout(timeoutId);
+    signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -1431,6 +1422,7 @@ async function startServer() {
     const controller = activeDownloads.get(Number(movieId));
     if (controller) {
       controller.abort("canceled");
+      activeDownloads.delete(Number(movieId));
       res.json({ success: true, message: "Download cancellation sent" });
     } else {
       const movie = db.find(m => m.id === Number(movieId));
