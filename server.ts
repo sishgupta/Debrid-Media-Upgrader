@@ -76,6 +76,7 @@ interface AppSettings {
   streamAudioFilter: string;
   streamMinBitrate: number;
   streamMaxBitrate: number;
+  streamCacheExpiryDays: number;
   theme: 'system' | 'light' | 'dark';
 }
 
@@ -88,6 +89,7 @@ let settingsCache: AppSettings = {
   streamAudioFilter: "All",
   streamMinBitrate: 0,
   streamMaxBitrate: 100,
+  streamCacheExpiryDays: 1,
   theme: 'dark'
 };
 
@@ -103,7 +105,15 @@ function loadSettings() {
 }
 
 function saveSettings(newSettings: Partial<AppSettings>) {
+  const oldUrl = settingsCache.aiostreamsUrl;
   settingsCache = { ...settingsCache, ...newSettings };
+  
+  if (oldUrl !== settingsCache.aiostreamsUrl) {
+    console.log(`[Settings] AIOStreams URL changed from "${oldUrl}" to "${settingsCache.aiostreamsUrl}". Clearing search cache.`);
+    aiostreamsCache = {};
+    saveAiostreamsCache();
+  }
+  
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settingsCache, null, 2));
 }
 
@@ -569,6 +579,53 @@ async function tmdbFetch(url: string) {
   return await res.json();
 }
 
+async function unrollAiostreamsLink(link: string): Promise<string | null> {
+    try {
+        console.log(`[Unroll] Probing: ${link}`);
+        const probeRes = await fetch(link, { 
+            method: 'GET', 
+            redirect: 'manual',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*'
+            }
+        });
+        
+        // Handle direct redirects (Debrid/Torbox usually)
+        if (probeRes.status >= 300 && probeRes.status < 400 && probeRes.headers.get('location')) {
+            const loc = probeRes.headers.get('location');
+            if (loc) return loc;
+        }
+
+        // If it's already a direct debrid link (200 OK), return as is
+        if (probeRes.ok) {
+            const url = new URL(link);
+            if (url.hostname.includes('torbox') || url.hostname.includes('real-debrid') || url.hostname.includes('alldebrid')) {
+                return link;
+            }
+        }
+        
+        return null;
+    } catch(err) {
+        console.error("Error in unrollAiostreamsLink", err);
+        return null;
+    }
+}
+
+function getReleaseNameFromUrl(link: string): string {
+    try {
+        const url = new URL(link);
+        const segments = url.pathname.split('/');
+        let filename = segments.pop() || "";
+        if (!filename && segments.length > 0) filename = segments.pop() || "";
+        // Decode and strip query/hash
+        filename = decodeURIComponent(filename).split('?')[0].split('#')[0];
+        return filename;
+    } catch (e) {
+        return "";
+    }
+}
+
 async function fetchImdbId(movieName: string, year: string): Promise<{ imdbId: string; tmdbTitle: string; year?: string } | null> {
   if (!settingsCache.tmdbApiKey) {
     throw new Error("TMDB_API_KEY is not configured in settings. Please add it first.");
@@ -606,7 +663,6 @@ const AIOSTREAMS_DELAY_MS = 1000; // Let's be polite: 1 req/sec
 let nextAiostreamsCallTime = 0;
 
 const AIOSTREAMS_CACHE_PATH = path.join(process.cwd(), "aiostreams_cache.json");
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
 
 // In-memory + persistent cache
 let aiostreamsCache: Record<string, { timestamp: number; data: any }> = {};
@@ -619,8 +675,9 @@ function loadAiostreamsCache() {
       const now = Date.now();
       const cleaned: Record<string, { timestamp: number; data: any }> = {};
       let removedCount = 0;
+      const ttlMs = (settingsCache.streamCacheExpiryDays || 1) * 1000 * 60 * 60 * 24;
       for (const [id, entry] of Object.entries(aiostreamsCache)) {
-        if (now - entry.timestamp < CACHE_TTL_MS * 7) { // Keep even expired stuff for a bit longer in file, but we'll re-fetch if > TTL
+        if (now - entry.timestamp < ttlMs * 7) { 
           cleaned[id] = entry;
         } else {
           removedCount++;
@@ -645,13 +702,42 @@ function saveAiostreamsCache() {
 // Initial load
 loadAiostreamsCache();
 
+function containsAiostreamsError(data: any): string | null {
+  if (data && data.streams && Array.isArray(data.streams)) {
+    const errorStream = data.streams.find((s: any) => 
+      s.streamData?.type === 'error' || 
+      s.type === 'error' || 
+      (s.name && (s.name.includes('[❌]') || s.name.includes('reconfigure'))) || 
+      (s.title && (s.title.includes('[❌]') || s.title.includes('reconfigure'))) ||
+      (s.description && (s.description.includes('[❌]') || s.description.includes('reconfigure')))
+    );
+
+    if (errorStream) {
+      return errorStream.title || errorStream.name || errorStream.description || "AIOStreams configuration error";
+    }
+  }
+  return null;
+}
+
 async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
+  const baseUrl = settingsCache.aiostreamsUrl;
+  console.log(`[Search] Function entry. Using AIOStreams Base URL: ${baseUrl}`);
+
   const cached = aiostreamsCache[imdbId];
+  const ttlMs = (settingsCache.streamCacheExpiryDays || 1) * 1000 * 60 * 60 * 24;
+
   if (!forceRefresh && cached) {
     const age = Date.now() - cached.timestamp;
-    if (age < CACHE_TTL_MS) {
-      console.log(`[Cache] HIT for ${imdbId} (Age: ${Math.round(age/1000/60)}m). Skipping network call.`);
-      return cached.data;
+    if (age < ttlMs) {
+      // Check if cached data contains an error stream or is empty before returning as HIT
+      const errorMsg = containsAiostreamsError(cached.data);
+      const streamsCount = (cached.data.streams && Array.isArray(cached.data.streams)) ? cached.data.streams.length : 0;
+      if (!errorMsg && streamsCount > 0) {
+        console.log(`[Cache] HIT for ${imdbId} (Age: ${Math.round(age/1000/60)}m, Streams: ${streamsCount}). Skipping network call.`);
+        return cached.data;
+      } else {
+        console.log(`[Cache] Found cached ${errorMsg ? "error" : "empty results"} for ${imdbId}. Ignoring cache and re-fetching.`);
+      }
     } else {
       console.log(`[Cache] EXPIRED for ${imdbId} (Age: ${Math.round(age/1000/60)}m). Will re-fetch.`);
     }
@@ -660,10 +746,25 @@ async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
   } else {
     console.log(`[Cache] MISS for ${imdbId}.`);
   }
+  
+  if (!baseUrl || baseUrl === "http://localhost:3000") {
+    throw new Error("AIOStreams URL is not configured. Please go to Settings and provide your AIOStreams manifest URL (e.g., https://aiostreams.example.com/TOKEN/manifest.json)");
+  }
 
-  const baseUrl = settingsCache.aiostreamsUrl;
-  if (!baseUrl) {
-    throw new Error("AIOSTREAMS_URL is not set in environment");
+  // Basic validation - should have some path if it's a configured instance
+  try {
+    const parsed = new URL(baseUrl);
+    // If it ends in manifest.json, we want to strip it for the API calls
+    // But we use the base for the /stream/... endpoint construction anyway.
+    
+    // Check if it looks like a manifest URL but might be missing the "TOKEN" part
+    // Many AIOStreams instances use /TOKEN/manifest.json
+    if (parsed.pathname === "/" || parsed.pathname === "" || parsed.pathname === "/manifest.json") {
+        throw new Error("AIOStreams URL is incomplete. It seems to be missing the configuration token. Please ensure you copied the FULL manifest URL from the AIOStreams configuration page.");
+    }
+  } catch (e: any) {
+     if (e.message.includes("is incomplete")) throw e;
+     throw new Error(`Invalid AIOStreams URL format: ${e.message}`);
   }
 
   const reqNow = Date.now();
@@ -675,22 +776,47 @@ async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
     
     // Check cache again after wait
     const cachedAfterWait = aiostreamsCache[imdbId];
-    if (!forceRefresh && cachedAfterWait && (Date.now() - cachedAfterWait.timestamp < CACHE_TTL_MS)) {
-      console.log(`[Cache] HIT after wait for ${imdbId}. Skipping network call.`);
-      return cachedAfterWait.data;
+    if (!forceRefresh && cachedAfterWait && (Date.now() - cachedAfterWait.timestamp < ttlMs)) {
+      const errorMsg = containsAiostreamsError(cachedAfterWait.data);
+      const streamsCount = (cachedAfterWait.data.streams && Array.isArray(cachedAfterWait.data.streams)) ? cachedAfterWait.data.streams.length : 0;
+      if (!errorMsg && streamsCount > 0) {
+        console.log(`[Cache] HIT after wait for ${imdbId} (Streams: ${streamsCount}). Skipping network call.`);
+        return cachedAfterWait.data;
+      }
     }
   }
   
-  // Clean trailing slash
-  const url = `${baseUrl.replace(/\/$/, '')}/stream/movie/${imdbId}.json`;
+  // Clean trailing slash and manifest.json if present
+  let normalizedBase = baseUrl.replace(/\/$/, '');
+  if (normalizedBase.endsWith('/manifest.json')) {
+    normalizedBase = normalizedBase.substring(0, normalizedBase.length - '/manifest.json'.length);
+  }
+  
+  const url = `${normalizedBase}/stream/movie/${imdbId}.json`;
   
   console.log(`[Network] Calling AIOStreams: ${url}`);
   const res = await fetch(url);
   if (!res.ok) {
-     throw new Error(`AIOStreams HTTP Error: ${res.status}`);
+      if (res.status === 404) {
+          throw new Error(`AIOStreams returned 404. Your configuration token might be wrong or the instance is down.`);
+      }
+      throw new Error(`AIOStreams HTTP Error: ${res.status}`);
   }
   const data = await res.json();
   
+  // Detect AIOStreams configuration errors
+  const errorMsg = containsAiostreamsError(data);
+  if (errorMsg) {
+    console.log(`[Network] AIOStreams error detected: ${errorMsg}`);
+    throw new Error(`AIOStreams Error: ${errorMsg}. Your provider URL in Settings is likely missing required configuration or is outdated.`);
+  }
+
+  const streamsCount = (data.streams && Array.isArray(data.streams)) ? data.streams.length : 0;
+  if (streamsCount === 0) {
+    console.log(`[Network] AIOStreams returned 0 streams for ${imdbId}. Not caching to allow immediate retry.`);
+    return data;
+  }
+
   aiostreamsCache[imdbId] = { timestamp: Date.now(), data };
   saveAiostreamsCache();
   return data;
@@ -751,7 +877,7 @@ async function startServer() {
 
   app.post("/api/settings", (req, res) => {
     try {
-      const { tmdbApiKey, aiostreamsUrl, targetFolder, streamResFilter, streamVideoFilter, streamAudioFilter, streamMinBitrate, streamMaxBitrate, theme } = req.body;
+      const { tmdbApiKey, aiostreamsUrl, targetFolder, streamResFilter, streamVideoFilter, streamAudioFilter, streamMinBitrate, streamMaxBitrate, streamCacheExpiryDays, theme } = req.body;
       const oldTarget = settingsCache.targetFolder;
       saveSettings({ 
         tmdbApiKey: tmdbApiKey ?? settingsCache.tmdbApiKey,
@@ -762,6 +888,7 @@ async function startServer() {
         streamAudioFilter: streamAudioFilter ?? settingsCache.streamAudioFilter,
         streamMinBitrate: streamMinBitrate ?? settingsCache.streamMinBitrate,
         streamMaxBitrate: streamMaxBitrate ?? settingsCache.streamMaxBitrate,
+        streamCacheExpiryDays: streamCacheExpiryDays ?? settingsCache.streamCacheExpiryDays,
         theme: theme ?? settingsCache.theme,
       });
       console.log(`[API] Settings updated successfully.`);
@@ -1081,7 +1208,7 @@ async function startServer() {
 
   // Search using AIOStreams
   app.post("/api/search", async (req, res) => {
-    const { movieId, minRes, minBitrate } = req.body;
+    const { movieId, minRes, minBitrate, force } = req.body;
     try {
       const movie = db.find(m => m.id === Number(movieId));
       if (!movie) return res.status(404).json({ error: "Movie not found" });
@@ -1090,9 +1217,9 @@ async function startServer() {
         return res.status(400).json({ error: "Cannot search without an IMDB ID. Please ensure TMDB API key is set and file has a valid name." });
       }
 
-      const streamData = await aiostreamsSearch(movie.imdbId);
+      const streamData = await aiostreamsSearch(movie.imdbId, force === true);
       const streams = streamData.streams || [];
-      console.log(`[Search] Found ${streams.length} streams for IMDB ID: ${movie.imdbId}`);
+      console.log(`[Search] Found ${streams.length} valid streams for IMDB ID: ${movie.imdbId}`);
 
       const formattedStreams = streams.map((s: any) => {
         let link = null;
@@ -1132,8 +1259,9 @@ async function startServer() {
         console.log(`[Search] Stream data sample:`, streams.slice(0, 2));
         res.status(404).json({ error: `No suitable streams found for this content (found ${streams.length} total, but none had valid links)` });
       }
-    } catch (error) {
-      res.status(500).json({ error: String(error) });
+    } catch (error: any) {
+      console.error(`[Search] Error:`, error);
+      res.status(500).json({ error: error.message || String(error) });
     }
   });
 
@@ -1147,31 +1275,41 @@ async function startServer() {
 
     // Unroll ephemeral proxy URLs immediately before they expire
     try {
-        if (link.includes('/api/v1/debrid/playback') || link.includes('/stream/')) {
-            console.log(`[Proxy Link] Unrolling proxy URL: ${link}`);
-            // Use GET with manual redirect to just fetch the Location header
-            const probeRes = await fetch(link, { 
-                method: 'GET', 
-                redirect: 'manual',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Accept': '*/*'
+        const isProxyLink = link.includes('/api/v1/debrid/playback') || link.includes('/stream/');
+        if (isProxyLink) {
+            console.log(`[Proxy Link] Processing ephemeral URL: ${link}`);
+            let dest = await unrollAiostreamsLink(link);
+            
+            // If it failed to unroll (likely expired), try refreshing if we have an IMDB ID
+            if (!dest && movie.imdbId) {
+                console.log(`[Proxy Link] Link check failed (possibly expired). Attempting background refresh for ${movie.imdbId}...`);
+                const releaseName = getReleaseNameFromUrl(link);
+                if (releaseName && releaseName.length > 5) {
+                    const freshStreams = await aiostreamsSearch(movie.imdbId, true); // force refresh
+                    const freshStream = freshStreams.streams.find((s: any) => {
+                        const sUrl = s.url || s.link || s.externalUrl || "";
+                        return sUrl && sUrl.toLowerCase().includes(releaseName.toLowerCase());
+                    });
+                    
+                    if (freshStream) {
+                        const freshLink = freshStream.url || freshStream.link || freshStream.externalUrl;
+                        console.log(`[Proxy Link] Found matching fresh stream. Attempting re-unroll...`);
+                        dest = await unrollAiostreamsLink(freshLink);
+                    } else {
+                        console.log(`[Proxy Link] Could not find a stream matching release name: ${releaseName}`);
+                    }
                 }
-            });
-            if (probeRes.status >= 300 && probeRes.status < 400 && probeRes.headers.get('location')) {
-                const dest = probeRes.headers.get('location');
-                if (dest) {
-                    console.log(`[Proxy Link] Successfully unrolled to: ${dest}`);
-                    link = dest;
-                }
-            } else if (probeRes.ok) {
-                console.log(`[Proxy Link] URL returned 200 OK directly, keeping original link.`);
+            }
+
+            if (dest) {
+                console.log(`[Proxy Link] Successfully finalized link: ${dest}`);
+                link = dest;
             } else {
-                console.log(`[Proxy Link] Unexpected status ${probeRes.status} when unrolling.`);
+                console.warn(`[Proxy Link] Warning: Could not resolve to a stable download link. Proceeding with original but it may 400.`);
             }
         }
     } catch(err) {
-        console.error(`[Proxy Link] Failed to unroll link:`, err);
+        console.error(`[Proxy Link] Error during link finalization:`, err);
     }
 
     movie.magnetLink = link;
@@ -1210,8 +1348,8 @@ async function startServer() {
       runUpgrade(Number(movieId)).catch(err => console.error("Async upgrade error:", err));
       
       res.json({ success: true, message: "Upgrade started" });
-    } catch (error) {
-       res.status(500).json({ error: String(error) });
+    } catch (error: any) {
+       res.status(500).json({ error: error.message || String(error) });
     }
   });
 
@@ -1246,8 +1384,8 @@ async function startServer() {
       
       runUpgrade(Number(movieId)).catch(err => console.error("Async resume error:", err));
       res.json({ success: true, message: "Upgrade resumed" });
-    } catch (error) {
-       res.status(500).json({ error: String(error) });
+    } catch (error: any) {
+       res.status(500).json({ error: error.message || String(error) });
     }
   });
 

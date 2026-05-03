@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, RefreshCw, Download, Trash2, Edit2, Play, Pause, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw, Ban, Terminal } from 'lucide-react';
+import { Search, RefreshCw, Download, Trash2, Edit2, Play, Pause, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw, Ban, Terminal, AlertCircle } from 'lucide-react';
 import axios from 'axios';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -69,12 +69,14 @@ export default function App() {
     streamAudioFilter: 'All',
     streamMinBitrate: 0,
     streamMaxBitrate: 100,
+    streamCacheExpiryDays: 1,
     theme: 'dark' as 'light' | 'dark' | 'system'
   });
   const [streamSelectorData, setStreamSelectorData] = useState<{movieId: number, streams: any[]} | null>(null);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [isQueueActive, setIsQueueActive] = useState(false);
+  const [globalError, setGlobalError] = useState<string | null>(null);
 
   useEffect(() => {
     let interval: any;
@@ -200,43 +202,51 @@ export default function App() {
 
   const handleScan = async () => {
     setIsLoading(true);
+    setGlobalError(null);
     try {
       await axios.post('/api/scan');
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error scanning");
+      setGlobalError(e.response?.data?.error || e.message || "Error scanning");
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleSearch = async (movieId: number) => {
+  const handleSearch = async (movieId: number, force = false) => {
+    setGlobalError(null);
+    // Open modal in loading state immediately
+    setStreamSelectorData({ movieId, streams: [], isLoading: true });
+    
     try {
-      const res = await axios.post('/api/search', { movieId, minRes: maxResFilter, minBitrate: maxBitrateFilter });
-      if (res.data.streams) {
-         setStreamSelectorData({ movieId, streams: res.data.streams });
-      }
+      const res = await axios.post('/api/search', { movieId, minRes: maxResFilter, minBitrate: maxBitrateFilter, force });
+      setStreamSelectorData({ movieId, streams: res.data.streams || [], isLoading: false });
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error searching");
+      const msg = e.response?.data?.error || e.message || "Error searching";
+      setGlobalError(msg);
+      setStreamSelectorData(null);
+      console.error("[Search Error]", msg);
     }
   };
 
   const handleSelectStream = async (movieId: number, link: string, meta: any) => {
+     setGlobalError(null);
      try {
        await axios.post(`/api/movie/${movieId}/set-stream`, { link, meta });
        setStreamSelectorData(null);
        await fetchMovies();
      } catch (e: any) {
-       alert(e.response?.data?.error || "Error setting stream");
+       setGlobalError(e.response?.data?.error || "Error setting stream");
      }
   };
 
   const handleUpgrade = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post('/api/upgrade', { movieId });
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error upgrading");
+      setGlobalError(e.response?.data?.error || e.message || "Error upgrading");
     }
   };
 
@@ -572,6 +582,33 @@ export default function App() {
       </header>
 
       <main>
+        {globalError && (
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/50 rounded-lg flex items-start gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
+             <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+             <div className="flex-1">
+                <h4 className="text-sm font-bold text-red-800 dark:text-red-300">
+                  {globalError.includes("AIOStreams Error") ? "AIOStreams Problem" : 
+                   globalError.includes("AIOStreams URL") ? "Connection Setup Required" : 
+                   "Operation Error"}
+                </h4>
+                <p className="text-sm text-red-700 dark:text-red-400/80 mt-1">{globalError}</p>
+                <div className="mt-3 flex items-center gap-3">
+                   <button 
+                     onClick={() => { setShowSettings(true); setGlobalError(null); }}
+                     className="text-xs font-bold px-3 py-1.5 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 text-red-800 dark:text-red-200 rounded transition-colors"
+                   >
+                     Fix in Settings
+                   </button>
+                   <button 
+                     onClick={() => setGlobalError(null)}
+                     className="text-xs font-medium text-red-600 dark:text-red-400 hover:underline"
+                   >
+                     Dismiss
+                   </button>
+                </div>
+             </div>
+          </div>
+        )}
         {/* Desktop Table View */}
         <div className="hidden md:block overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 shadow-sm transition-all duration-300">
           <table className="w-full text-left text-sm whitespace-nowrap">
@@ -811,6 +848,7 @@ export default function App() {
           data={streamSelectorData}
           defaultFilters={settingsForm}
           onClose={() => setStreamSelectorData(null)}
+          onRefresh={() => handleSearch(streamSelectorData.movieId, true)}
           onSelect={(link: string, meta: any) => handleSelectStream(streamSelectorData.movieId, link, meta)}
         />
       )}
@@ -862,6 +900,25 @@ export default function App() {
                   className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 font-mono shadow-sm"
                 />
                 <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">Changing this will create the folder if it does not exist.</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">Stream Cache Expiry (Days)</label>
+                <div className="flex items-center gap-4">
+                  <input 
+                    type="range" 
+                    min="1" 
+                    max="30" 
+                    step="1"
+                    value={settingsForm.streamCacheExpiryDays}
+                    onChange={e => setSettingsForm({...settingsForm, streamCacheExpiryDays: parseInt(e.target.value)})}
+                    className="flex-1 accent-indigo-500"
+                  />
+                  <span className="text-sm font-medium text-slate-700 dark:text-slate-200 w-8">{settingsForm.streamCacheExpiryDays}</span>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">
+                  How long to keep stream search results in cache.
+                </p>
               </div>
 
               <div>

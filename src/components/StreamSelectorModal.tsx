@@ -1,6 +1,13 @@
 import React, { useState, useMemo } from 'react';
-import { X } from 'lucide-react';
+import { X, RefreshCw } from 'lucide-react';
 import * as Slider from '@radix-ui/react-slider';
+import { motion } from 'motion/react';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
 
 const parseStreamMetadata = (title: string, name: string) => {
   const t = (title + ' ' + name).toLowerCase();
@@ -51,14 +58,26 @@ const parseStreamMetadata = (title: string, name: string) => {
   return { res, video, audio, sizeGiB, bitrateMbps, bitrateEstimated, extension };
 };
 
-export default function StreamSelectorModal({ data, onClose, onSelect, defaultFilters }: any) {
+export default function StreamSelectorModal({ data, onClose, onRefresh, onSelect, defaultFilters }: any) {
   const [resFilter, setResFilter] = useState(defaultFilters?.streamResFilter || 'All');
   const [videoFilter, setVideoFilter] = useState(defaultFilters?.streamVideoFilter || 'All');
   const [audioFilter, setAudioFilter] = useState(defaultFilters?.streamAudioFilter || 'All');
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [minBitrateFilter, setMinBitrateFilter] = useState(defaultFilters?.streamMinBitrate || 0);
   const [maxBitrateFilter, setMaxBitrateFilter] = useState(defaultFilters?.streamMaxBitrate !== undefined ? defaultFilters.streamMaxBitrate : 100);
 
+  const handleRefresh = async () => {
+    if (!onRefresh) return;
+    setIsRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const streamsWithMeta = useMemo(() => {
+    if (!data.streams) return [];
     return data.streams.map((s: any) => ({
       ...s,
       meta: parseStreamMetadata(s.title, s.name)
@@ -82,12 +101,28 @@ export default function StreamSelectorModal({ data, onClose, onSelect, defaultFi
 
   return (
     <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[100] flex items-center justify-center p-2 sm:p-4">
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl w-full max-w-4xl p-4 sm:p-6 flex flex-col max-h-[95vh] sm:max-h-[85vh]">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg shadow-xl w-full max-w-4xl p-4 sm:p-6 flex flex-col max-h-[95vh] sm:max-h-[85vh]"
+      >
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg sm:text-xl font-medium text-slate-900 dark:text-slate-100">Select Stream</h3>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 min-w-[44px] min-h-[44px] flex items-center justify-center">
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {onRefresh && (
+              <button 
+                onClick={handleRefresh} 
+                disabled={isRefreshing}
+                className="p-2 text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300 min-w-[44px] min-h-[44px] flex items-center justify-center disabled:opacity-50"
+                title="Refresh from AIOStreams (Bypass cache)"
+              >
+                <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              </button>
+            )}
+            <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 min-w-[44px] min-h-[44px] flex items-center justify-center">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
         
         <div className="grid grid-cols-1 sm:flex sm:flex-wrap gap-4 mb-4 p-4 bg-slate-50 dark:bg-slate-950 rounded-lg border border-slate-200 dark:border-slate-800">
@@ -159,42 +194,67 @@ export default function StreamSelectorModal({ data, onClose, onSelect, defaultFi
           </div>
         </div>
 
-        <div className="text-xs text-slate-400 dark:text-slate-500 mb-2">Showing {filteredStreams.length} / {streamsWithMeta.length} streams</div>
+        <div className="text-xs text-slate-400 dark:text-slate-500 mb-2">
+          {data.isLoading ? 'Searching for streams...' : `Showing ${filteredStreams.length} / ${streamsWithMeta.length} streams`}
+        </div>
 
-        <div className="flex-1 overflow-y-auto space-y-2 pr-2">
-          {filteredStreams.map((stream: any, idx: number) => (
-            <div key={idx} className="p-3 border border-slate-100 dark:border-slate-800 rounded bg-slate-50 dark:bg-slate-800/30 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors flex justify-between items-center gap-4 shadow-sm">
-              <div className="flex-1 text-sm text-slate-600 dark:text-slate-300 break-words whitespace-pre-wrap">
-                <span className="font-semibold text-slate-900 dark:text-slate-100 block mb-1">
-                  {stream.name}{' '}
-                  {stream.meta.sizeGiB > 0 && <span className="ml-2 text-indigo-600 dark:text-indigo-400 font-normal">~{stream.meta.sizeGiB.toFixed(2)} GB</span>}
-                </span>
-                <span className="text-xs text-slate-500 dark:text-slate-400">{stream.title}</span>
-                
-                <div className="flex gap-2 mt-2">
-                   {stream.meta.res !== 'Unknown' && <span className="px-1.5 py-0.5 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 rounded text-[10px] border border-slate-200 dark:border-slate-700">{stream.meta.res}</span>}
-                   {stream.meta.video !== 'Other' && <span className="px-1.5 py-0.5 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 rounded text-[10px] border border-slate-200 dark:border-slate-700">{stream.meta.video}</span>}
-                   {stream.meta.audio !== 'Other' && <span className="px-1.5 py-0.5 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 rounded text-[10px] border border-slate-200 dark:border-slate-700">{stream.meta.audio}</span>}
-                   {stream.meta.bitrateMbps > 0 && (
-                     <span className="px-1.5 py-0.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded text-[10px] border border-indigo-100 dark:border-indigo-500/30">
-                       ~{stream.meta.bitrateMbps.toFixed(1)} Mbps {stream.meta.bitrateEstimated ? '(est)' : ''}
-                     </span>
-                   )}
-                </div>
-              </div>
-              <button
-                onClick={() => onSelect(stream.url || stream.link || stream.externalUrl || stream.infoHash, { ...stream.meta, streamName: stream.name, filename: stream.filename })}
-                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm font-medium transition-colors shrink-0 shadow mt-2"
-              >
-                Select
-              </button>
+        <div className="flex-1 overflow-y-auto space-y-2 pr-2 relative min-h-[200px]">
+          {data.isLoading ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center p-8 bg-white/50 dark:bg-slate-900/50 backdrop-blur-[1px] z-10 rounded-xl">
+               <RefreshCw className="w-10 h-10 text-indigo-500 animate-spin mb-4" />
+               <p className="text-slate-600 dark:text-slate-300 font-medium animate-pulse">Searching AIOStreams...</p>
+               <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">This may take up to 10 seconds</p>
             </div>
-          ))}
-          {filteredStreams.length === 0 && (
-            <div className="text-slate-400 text-center py-8">No matching streams.</div>
+          ) : (
+            <>
+              {filteredStreams.map((stream: any, idx: number) => (
+                <div key={idx} className="p-3 border border-slate-100 dark:border-slate-800 rounded bg-slate-50 dark:bg-slate-800/30 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors flex justify-between items-center gap-4 shadow-sm">
+                  <div className="flex-1 text-sm text-slate-600 dark:text-slate-300 break-words whitespace-pre-wrap">
+                    <span className="font-semibold text-slate-900 dark:text-slate-100 block mb-1">
+                      {stream.name}{' '}
+                      {stream.meta.sizeGiB > 0 && <span className="ml-2 text-indigo-600 dark:text-indigo-400 font-normal">~{stream.meta.sizeGiB.toFixed(2)} GB</span>}
+                    </span>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">{stream.title}</span>
+                    
+                    <div className="flex gap-2 mt-2">
+                       {stream.meta.res !== 'Unknown' && <span className="px-1.5 py-0.5 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 rounded text-[10px] border border-slate-200 dark:border-slate-700">{stream.meta.res}</span>}
+                       {stream.meta.video !== 'Other' && <span className="px-1.5 py-0.5 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 rounded text-[10px] border border-slate-200 dark:border-slate-700">{stream.meta.video}</span>}
+                       {stream.meta.audio !== 'Other' && <span className="px-1.5 py-0.5 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 rounded text-[10px] border border-slate-200 dark:border-slate-700">{stream.meta.audio}</span>}
+                       {stream.meta.bitrateMbps > 0 && (
+                         <span className="px-1.5 py-0.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded text-[10px] border border-indigo-100 dark:border-indigo-500/30">
+                           ~{stream.meta.bitrateMbps.toFixed(1)} Mbps {stream.meta.bitrateEstimated ? '(est)' : ''}
+                         </span>
+                       )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => onSelect(stream.url || stream.link || stream.externalUrl || stream.infoHash, { ...stream.meta, streamName: stream.name, filename: stream.filename })}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm font-medium transition-colors shrink-0 shadow mt-2"
+                  >
+                    Select
+                  </button>
+                </div>
+              ))}
+              {filteredStreams.length === 0 && (
+                <div className="text-slate-500 dark:text-slate-400 text-center py-12 px-4 bg-slate-50 dark:bg-slate-950/50 rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-800">
+                  <p className="text-sm font-medium mb-1">No matching streams found</p>
+                  <p className="text-xs opacity-70 mb-4">
+                    Try adjusting your filters or checking your AIOStreams configuration in Settings.
+                  </p>
+                  <button 
+                    onClick={handleRefresh}
+                    disabled={isRefreshing}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-sm font-medium transition-colors shadow-sm disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-4 h-4", isRefreshing && "animate-spin")} />
+                    Try Refreshing (Force Refresh)
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
