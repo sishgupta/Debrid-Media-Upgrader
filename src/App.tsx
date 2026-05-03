@@ -78,6 +78,15 @@ export default function App() {
   const [isQueueActive, setIsQueueActive] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
 
+  const handleClearLogs = async () => {
+    try {
+      await axios.delete('/api/logs');
+      setLogs([]);
+    } catch (err) {
+      console.error("Error clearing logs", err);
+    }
+  };
+
   useEffect(() => {
     let interval: any;
     if (showLogs) {
@@ -1108,9 +1117,9 @@ export default function App() {
               </div>
               <div className="flex items-center gap-2">
                 <button 
-                  onClick={() => setLogs([])}
+                  onClick={handleClearLogs}
                   className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
-                  title="Clear Local View"
+                  title="Clear Server Logs"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>

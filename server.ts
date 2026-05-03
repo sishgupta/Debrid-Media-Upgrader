@@ -747,10 +747,6 @@ async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
     console.log(`[Cache] MISS for ${imdbId}.`);
   }
   
-  if (!baseUrl || baseUrl === "http://localhost:3000") {
-    throw new Error("AIOStreams URL is not configured. Please go to Settings and provide your AIOStreams manifest URL (e.g., https://aiostreams.example.com/TOKEN/manifest.json)");
-  }
-
   // Basic validation - should have some path if it's a configured instance
   try {
     const parsed = new URL(baseUrl);
@@ -826,34 +822,50 @@ const MOCK_DIR = path.join(process.cwd(), "mock_media");
 
 // Ensure dummy files exist to test scanning
 function createMockMediaFiles() {
-  const dummyFiles = [
-    "Inception (2010).mp4",
-    "The Matrix (1999).mkv",
-    "Dune Part Two (2024).webm",
-    "Bad Movie.avi",
-    "Interstellar (2014).mp4",
-    "Avatar The Way of Water.mkv",
-    "The Dark Knight (2008).mkv",
-    "Pulp Fiction.mp4",
-    "Avengers Endgame (2019).avi",
-    "Spider-Man No Way Home.webm",
-    "Jurassic Park (1993).mp4",
-    "Gladiator (2000).mkv",
-    "Titanic.avi",
-    "The Lord of the Rings The Fellowship of the Ring (2001).mkv",
-    "Mad Max Fury Road (2015).webm"
+  // Clear mock directory to avoid mixing old/new formats
+  if (fs.existsSync(MOCK_DIR)) {
+    const files = fs.readdirSync(MOCK_DIR);
+    for (const file of files) {
+      const p = path.join(MOCK_DIR, file);
+      if (fs.statSync(p).isFile()) fs.unlinkSync(p);
+    }
+  } else {
+    fs.mkdirSync(MOCK_DIR, { recursive: true });
+  }
+
+  const dummyMovies = [
+    "Inception (2010)",
+    "The Matrix (1999)",
+    "Dune Part Two (2024)",
+    "Bad Movie",
+    "Interstellar (2014)",
+    "Avatar The Way of Water",
+    "The Dark Knight (2008)",
+    "Pulp Fiction",
+    "Avengers Endgame (2019)",
+    "Spider-Man No Way Home",
+    "Jurassic Park (1993)",
+    "Gladiator (2000)",
+    "Titanic",
+    "The Lord of the Rings The Fellowship of the Ring (2001)",
+    "Mad Max Fury Road (2015)",
+    "The Godfather (1972)"
   ];
+
+  const exts = [".mkv", ".mp4", ".webm", ".avi"];
   
   // SAFETY: Mock files can ONLY be created in the designated MOCK_DIR
   if (!fs.existsSync(MOCK_DIR)) {
     fs.mkdirSync(MOCK_DIR, { recursive: true });
   }
 
-  dummyFiles.forEach(file => {
-    const fullPath = path.join(MOCK_DIR, file);
+  dummyMovies.forEach((movie, i) => {
+    const ext = exts[i % exts.length];
+    const filename = `${movie}${ext}`;
+    const fullPath = path.join(MOCK_DIR, filename);
     if (!fs.existsSync(fullPath)) {
       try {
-        fs.writeFileSync(fullPath, "dummy video data");
+        fs.writeFileSync(fullPath, "mock video data");
       } catch (e) {
         console.error("Failed to write mock file via init", e)
       }
@@ -904,6 +916,18 @@ async function startServer() {
 
   app.get("/api/logs", (req, res) => {
     res.json({ logs: LOGS });
+  });
+
+  app.delete("/api/logs", (req, res) => {
+    try {
+      LOGS.length = 0;
+      if (fs.existsSync(LOG_FILE_PATH)) {
+        fs.writeFileSync(LOG_FILE_PATH, "");
+      }
+      res.json({ success: true });
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
   });
 
   app.get("/api/movies", async (req, res) => {
@@ -973,7 +997,7 @@ async function startServer() {
         }
         
         movieName = movieName.replace(/[\(\)\[\]\.\-_]/g, " "); // Extra cleaning
-        movieName = movieName.replace(/\b(4k|2160p|1080p|720p|480p|remux|bluray|x264|x265|h264|h265|hevc|avc|internal|dts|dd5|dual|audio)\b/gi, " ");
+        movieName = movieName.replace(/\b(4k|2160p|1080p|720p|480p|remux|bluray|x264|x265|h264|h265|hevc|avc|internal|dts|dd5|dual|audio|hdr|fhd|hd|sd|bdrip|brrip|webrip|web-dl|dvdrip|xvid|ac3|aac|repack|proper)\b/gi, " ");
         movieName = movieName.replace(/\s{2,}/g, " ").trim();
         if (movieName.endsWith("-")) movieName = movieName.slice(0, -1).trim();
 
@@ -1003,12 +1027,34 @@ async function startServer() {
         let hdr = false;
         
         if (fileSize <= 1000) {
-           const resolutions = ['1280x720', '1920x1080', '3840x2160', '720x480'];
            const hash = file.split('').reduce((a,b) => {a=((a<<5)-a)+b.charCodeAt(0);return a&a},0);
-           resolution = resolutions[Math.abs(hash) % resolutions.length];
-           bitrate = 1000000 + (Math.abs(hash) % 25000000);
-           fileSize = 700000000 + (Math.abs(hash) % 15000000000);
-           hdr = (hash % 2) === 0;
+           const q = Math.abs(hash) % 4;
+
+           if (q === 0) { // 4K Tier
+             resolution = '3840x2160';
+             bitrate = 65000000;
+             fileSize = 55000000000;
+             hdr = true;
+           } else if (q === 1) { // 1080p Tier
+             resolution = '1920x1080';
+             bitrate = 12000000;
+             fileSize = 9500000000;
+             hdr = false;
+           } else if (q === 2) { // 720p Tier
+             resolution = '1280x720';
+             bitrate = 4500000;
+             fileSize = 2400000000;
+             hdr = false;
+           } else { // 480p Tier
+             resolution = '720x480';
+             bitrate = 1500000;
+             fileSize = 850000000;
+             hdr = false;
+           }
+           
+           // Add slight variation for realism
+           bitrate += (Math.abs(hash) % 500000);
+           fileSize += (Math.abs(hash) % 100000000);
         }
 
         const newId = nextId++;
@@ -1165,42 +1211,8 @@ async function startServer() {
       // Automatically switch the user's focus to the mock folder so they can see the results
       saveSettings({ targetFolder: MOCK_DIR });
       
-      // Auto-scan the mock directory right away
-      const files = fs.readdirSync(MOCK_DIR);
-      let newCount = 0;
-      files.forEach(file => {
-        const filePath = path.join(MOCK_DIR, file);
-        if (fs.statSync(filePath).isFile()) {
-           const existing = db.find(m => m.filePath === filePath);
-           if (!existing) {
-             let movieName = file.replace(/\(.*\)/g, '').replace(/\.[^/.]+$/, "").replace(/\./g, ' ').trim();
-             let yearMatch = file.match(/\((\d{4})\)/);
-             let year = yearMatch ? yearMatch[1] : undefined;
-             let ext = path.extname(file);
-             
-             db.push({
-               id: nextId,
-               fileName: file,
-               movieName,
-               year,
-               filePath,
-               fileSize: fs.statSync(filePath).size,
-               resolution: '1920x1080',
-               bitrate: 5000000,
-               hdr: false,
-               ext,
-               magnetLink: null,
-               status: 'indexed',
-               imdbId: null
-             });
-             nextId++;
-             newCount++;
-           }
-        }
-      });
-      saveDb();
-
-      res.json({ success: true, message: `Mock files generated and ${newCount} items scanned into library.` });
+      // Let the standard scan endpoint handle the scanning to avoid logic duplication
+      res.json({ success: true, message: `Mock files generated in the mock directory. Please click Scan to refresh the library.` });
     } catch (e) {
       res.status(500).json({ error: String(e) });
     }
