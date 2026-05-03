@@ -192,9 +192,148 @@ function deleteCompanionSubtitles(videoPath: string) {
 }
 
 // Helper to download a file with progress reporting
-// Registry for active downloads to allow cancellation
 const activeDownloads = new Map<number, AbortController>();
+let isQueueActive = false;
 
+async function runUpgrade(movieId: number) {
+  const movie = db.find(m => m.id === Number(movieId));
+  if (!movie || movie.status === 'upgrading') return;
+
+  movie.status = 'upgrading';
+  movie.progress = 0;
+  saveDb();
+  
+  const isMock = movie.filePath.startsWith(MOCK_DIR);
+
+  if (isMock) {
+    // --- SIMULATION MODE ---
+    console.log(`[Upgrade] SIMULATING upgrade for MOCK movie "${movie.movieName}"`);
+    let currentProgress = 0;
+    const interval = setInterval(() => {
+      const m = db.find(x => x.id === Number(movieId));
+      if (!m || m.status !== 'upgrading') {
+        clearInterval(interval);
+        return;
+      }
+
+      currentProgress += Math.floor(Math.random() * 15) + 10;
+      if (currentProgress >= 100) {
+        currentProgress = 100;
+        m.status = 'upgraded';
+        m.progress = 100;
+        
+        const oldPath = m.filePath;
+        const parentDir = path.dirname(oldPath);
+        const extension = movie.upgradeMeta?.extension || m.ext || '.mkv';
+        const nameSegments = [m.movieName];
+        if (m.year) nameSegments.push(`(${m.year})`);
+        const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
+        const finalPath = path.join(parentDir, finalFileName);
+
+        try {
+          if (fs.existsSync(oldPath)) fs.renameSync(oldPath, oldPath + '.bak');
+          fs.writeFileSync(finalPath, "upgraded mock data");
+          m.filePath = finalPath;
+          m.fileName = finalFileName;
+          m.ext = extension;
+          m.status = 'verifying_upgrade';
+          
+          m.resolution = '3840x2160';
+          m.bitrate = 65000000;
+          m.hdr = true;
+          m.fileSize = 45000000000;
+        } catch (e) {}
+
+        m.magnetLink = null;
+        m.upgradeMeta = undefined;
+        saveDb();
+        clearInterval(interval);
+      } else {
+        m.progress = currentProgress;
+        saveDb();
+      }
+    }, 300);
+    return;
+  }
+
+  // --- REAL MODE ---
+  if (!movie.magnetLink) {
+     movie.status = 'indexed';
+     saveDb();
+     return;
+  }
+
+  const controller = new AbortController();
+  activeDownloads.set(movie.id, controller);
+
+  try {
+    const oldPath = movie.filePath;
+    const parentDir = path.dirname(oldPath);
+    const extension = movie.upgradeMeta?.extension || movie.ext || path.extname(oldPath) || '.mkv';
+    
+    const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
+    const stagingFileName = baseFileName 
+      ? `${sanitizeFileName(baseFileName)}.tmp` 
+      : `download_staging_${movie.id}.tmp`;
+    const stagingPath = path.join(parentDir, stagingFileName);
+
+    console.log(`[Upgrade] REAL Download starting for "${movie.movieName}"`);
+    await downloadFile(movie.magnetLink!, stagingPath, (p) => {
+      movie.progress = p;
+      if (p % 5 === 0) saveDb();
+    }, controller.signal);
+
+    activeDownloads.delete(movie.id);
+
+    const nameSegments = [movie.movieName];
+    if (movie.year) nameSegments.push(`(${movie.year})`);
+    const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
+    const finalPath = path.join(parentDir, finalFileName);
+
+    deleteCompanionSubtitles(oldPath);
+
+    if (fs.existsSync(oldPath)) {
+      let backupPath = oldPath + '.bak';
+      if (fs.existsSync(backupPath)) backupPath = oldPath + '.' + Date.now() + '.bak';
+      fs.renameSync(oldPath, backupPath);
+      movie.oldFilePath = backupPath;
+      movie.oldMeta = { resolution: movie.resolution, bitrate: movie.bitrate, fileSize: movie.fileSize, hdr: movie.hdr };
+    }
+    
+    if (fs.existsSync(finalPath) && finalPath !== oldPath) fs.unlinkSync(finalPath);
+    fs.renameSync(stagingPath, finalPath);
+
+    movie.filePath = finalPath;
+    movie.fileName = finalFileName;
+    movie.ext = extension;
+    movie.status = 'verifying_upgrade';
+    movie.progress = 100;
+
+    try {
+      const meta = await getMediaMetadata(movie.filePath);
+      const stat = fs.statSync(movie.filePath);
+      movie.resolution = meta.resolution;
+      movie.bitrate = meta.bitrate;
+      movie.hdr = meta.hdr;
+      movie.fileSize = stat.size;
+    } catch (e) {}
+    
+    movie.magnetLink = null;
+    movie.upgradeMeta = undefined;
+    saveDb();
+
+  } catch (err: any) {
+    activeDownloads.delete(movie.id);
+    if (err.name === 'AbortError') {
+      console.log(`[Upgrade] CANCELED upgrade for "${movie.movieName}"`);
+    } else {
+      console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
+    }
+    movie.status = 'indexed';
+    movie.progress = 0;
+    saveDb();
+  }
+}
 async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void, signal: AbortSignal): Promise<void> {
   const response = await fetch(url, { signal });
   if (!response.ok) {
@@ -546,10 +685,28 @@ async function startServer() {
         let movieName = baseName.replace(/[\._]/g, " "); // Replace dots and underscores with spaces
         let year = '';
         
-        const yearMatch = movieName.match(/\b(19|20)\d{2}\b/);
-        if (yearMatch) {
-          year = yearMatch[0];
-          movieName = movieName.replace(year, "");
+        // Try to find year in parentheses first (most reliable)
+        const yearInParen = movieName.match(/\((19|20)\d{2}\)/);
+        if (yearInParen) {
+          year = yearInParen[0].replace(/[\(\)]/g, '');
+          // Remove the specific year string that was inside parentheses
+          movieName = movieName.replace(yearInParen[0], "");
+        } else {
+          // Look for year at the end of the string
+          const yearAtEnd = movieName.match(/\b(19|20)\d{2}$/);
+          if (yearAtEnd) {
+            year = yearAtEnd[0];
+            movieName = movieName.replace(yearAtEnd[0], "");
+          } else {
+             // Fallback: look for the last occurrence of a year-like number
+             const matches = movieName.match(/\b(19|20)\d{2}\b/g);
+             if (matches) {
+               year = matches[matches.length - 1];
+               // Only replace the last occurrence to avoid mangling titles like "2001"
+               const lastIdx = movieName.lastIndexOf(year);
+               movieName = movieName.slice(0, lastIdx) + movieName.slice(lastIdx + year.length);
+             }
+          }
         }
         
         movieName = movieName.replace(/[\(\)\[\]\.\-_]/g, " "); // Extra cleaning
@@ -684,9 +841,19 @@ async function startServer() {
     const movie = db.find(m => m.id === movieId);
     if (!movie) return res.status(404).json({ error: "Movie not found" });
 
+    if (movie.status === 'upgrading' || movie.status === 'verifying_upgrade') {
+      return res.status(400).json({ error: "Cannot unmatch while movie is being upgraded" });
+    }
+
     console.log(`[TMDB] Removing match for "${movie.movieName}" (Old IMDB: ${movie.imdbId})`);
     movie.imdbId = null;
     movie.tmdbTitle = undefined;
+    
+    // Always reset status to indexed when unmatching
+    movie.status = 'indexed';
+    movie.magnetLink = null;
+    movie.upgradeMeta = undefined;
+    
     saveDb();
     res.json({ success: true });
   });
@@ -813,151 +980,35 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  app.get("/api/queue/status", (req, res) => {
+    const readyCount = db.filter(m => m.status === 'magnet_found').length;
+    res.json({ isActive: isQueueActive, readyCount });
+  });
+
+  app.post("/api/queue/start", (req, res) => {
+    isQueueActive = true;
+    console.log("[Queue] Server-side upgrade queue STARTED.");
+    res.json({ success: true });
+  });
+
+  app.post("/api/queue/stop", (req, res) => {
+    isQueueActive = false;
+    console.log("[Queue] Server-side upgrade queue STOPPED.");
+    res.json({ success: true });
+  });
+
   app.post("/api/upgrade", async (req, res) => {
     const { movieId } = req.body;
     try {
       const movie = db.find(m => m.id === Number(movieId));
-      if (movie && movie.status !== 'upgrading') {
-        movie.status = 'upgrading';
-        movie.progress = 0;
-        saveDb();
-        
-        const isMock = movie.filePath.startsWith(MOCK_DIR);
-
-        if (isMock) {
-          // --- SIMULATION MODE ---
-          console.log(`[Upgrade] SIMULATING upgrade for MOCK movie "${movie.movieName}"`);
-          let currentProgress = 0;
-          const interval = setInterval(() => {
-            const m = db.find(x => x.id === Number(movieId));
-            if (!m || m.status !== 'upgrading') {
-              clearInterval(interval);
-              return;
-            }
-
-            currentProgress += Math.floor(Math.random() * 15) + 10;
-            if (currentProgress >= 100) {
-              currentProgress = 100;
-              m.status = 'upgraded';
-              m.progress = 100;
-              
-              const oldPath = m.filePath;
-              const parentDir = path.dirname(oldPath);
-              const extension = movie.upgradeMeta?.extension || m.ext || '.mkv';
-              const nameSegments = [m.movieName];
-              if (m.year) nameSegments.push(`(${m.year})`);
-              const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
-              const finalPath = path.join(parentDir, finalFileName);
-
-              try {
-                if (fs.existsSync(oldPath)) fs.renameSync(oldPath, oldPath + '.bak');
-                fs.writeFileSync(finalPath, "upgraded mock data");
-                m.filePath = finalPath;
-                m.fileName = finalFileName;
-                m.ext = extension;
-                m.status = 'verifying_upgrade';
-                
-                m.resolution = '3840x2160';
-                m.bitrate = 65000000;
-                m.hdr = true;
-                m.fileSize = 45000000000;
-              } catch (e) {}
-
-              m.magnetLink = null;
-              m.upgradeMeta = undefined;
-              saveDb();
-              clearInterval(interval);
-            } else {
-              m.progress = currentProgress;
-              saveDb();
-            }
-          }, 300);
-          return res.json({ success: true, message: "Mock upgrade simulation started" });
-        }
-
-        // --- REAL MODE ---
-        if (!movie.magnetLink) {
-           movie.status = 'indexed';
-           saveDb();
-           return res.status(400).json({ error: "No magnet link/download URL found" });
-        }
-
-        const controller = new AbortController();
-        activeDownloads.set(movie.id, controller);
-
-        (async () => {
-          try {
-            const oldPath = movie.filePath;
-            const parentDir = path.dirname(oldPath);
-            const extension = movie.upgradeMeta?.extension || movie.ext || path.extname(oldPath) || '.mkv';
-            
-            const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
-            const stagingFileName = baseFileName 
-              ? `${sanitizeFileName(baseFileName)}.tmp` 
-              : `download_staging_${movie.id}.tmp`;
-            const stagingPath = path.join(parentDir, stagingFileName);
-
-            console.log(`[Upgrade] REAL Download starting for "${movie.movieName}"`);
-            await downloadFile(movie.magnetLink!, stagingPath, (p) => {
-              movie.progress = p;
-              if (p % 5 === 0) saveDb();
-            }, controller.signal);
-
-            activeDownloads.delete(movie.id);
-
-            const nameSegments = [movie.movieName];
-            if (movie.year) nameSegments.push(`(${movie.year})`);
-            const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
-            const finalPath = path.join(parentDir, finalFileName);
-
-            deleteCompanionSubtitles(oldPath);
-
-            if (fs.existsSync(oldPath)) {
-              let backupPath = oldPath + '.bak';
-              if (fs.existsSync(backupPath)) backupPath = oldPath + '.' + Date.now() + '.bak';
-              fs.renameSync(oldPath, backupPath);
-              movie.oldFilePath = backupPath;
-              movie.oldMeta = { resolution: movie.resolution, bitrate: movie.bitrate, fileSize: movie.fileSize, hdr: movie.hdr };
-            }
-            
-            if (fs.existsSync(finalPath) && finalPath !== oldPath) fs.unlinkSync(finalPath);
-            fs.renameSync(stagingPath, finalPath);
-
-            movie.filePath = finalPath;
-            movie.fileName = finalFileName;
-            movie.ext = extension;
-            movie.status = 'verifying_upgrade';
-            movie.progress = 100;
-
-            try {
-              const meta = await getMediaMetadata(movie.filePath);
-              const stat = fs.statSync(movie.filePath);
-              movie.resolution = meta.resolution;
-              movie.bitrate = meta.bitrate;
-              movie.hdr = meta.hdr;
-              movie.fileSize = stat.size;
-            } catch (e) {}
-            
-            movie.magnetLink = null;
-            movie.upgradeMeta = undefined;
-            saveDb();
-
-          } catch (err: any) {
-            activeDownloads.delete(movie.id);
-            if (err.name === 'AbortError') {
-              console.log(`[Upgrade] CANCELED upgrade for "${movie.movieName}"`);
-            } else {
-              console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
-            }
-            movie.status = 'indexed';
-            movie.progress = 0;
-            saveDb();
-          }
-        })();
-
-        return res.json({ success: true, message: "Upgrade started" });
-      }
-      res.status(404).json({ error: "Movie not found or already upgrading" });
+      if (!movie) return res.status(404).json({ error: "Movie not found" });
+      if (movie.status === 'upgrading') return res.status(400).json({ error: "Already upgrading" });
+      
+      // runUpgrade is async but we don't necessarily want to wait for the whole download here
+      // if it's a real download. Simulation is also async.
+      runUpgrade(Number(movieId)).catch(err => console.error("Async upgrade error:", err));
+      
+      res.json({ success: true, message: "Upgrade started" });
     } catch (error) {
        res.status(500).json({ error: String(error) });
     }
@@ -1137,6 +1188,24 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // Background Queue Worker
+  setInterval(async () => {
+    if (!isQueueActive) return;
+
+    const isAnyUpgrading = db.some(m => m.status === 'upgrading');
+    if (isAnyUpgrading) return;
+
+    const nextMovie = db.find(m => m.status === 'magnet_found');
+    if (nextMovie) {
+      console.log(`[Queue] Background worker starting upgrade for: ${nextMovie.movieName}`);
+      try {
+        await runUpgrade(nextMovie.id);
+      } catch (e) {
+        console.error(`[Queue] Error processing queue for ${nextMovie.movieName}:`, e);
+      }
+    }
+  }, 5000);
 }
 
 startServer();

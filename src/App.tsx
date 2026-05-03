@@ -145,25 +145,22 @@ export default function App() {
     };
   }, [settingsForm.theme]);
 
-  // Queue Manager Effect
+  // Remove frontend Queue Manager and replace with server status polling
   useEffect(() => {
-    if (!isQueueActive) return;
+    let interval: any;
+    const fetchQueueStatus = async () => {
+      try {
+        const res = await axios.get('/api/queue/status');
+        setIsQueueActive(res.data.isActive);
+      } catch (err) {
+        console.error("Error fetching queue status", err);
+      }
+    };
 
-    const readyMovies = movies.filter(m => m.status === 'magnet_found');
-    const isAnyUpgrading = movies.some(m => m.status === 'upgrading');
-
-    // If queue is empty and nothing is upgrading, we're done
-    if (readyMovies.length === 0 && !isAnyUpgrading) {
-      setIsQueueActive(false);
-      return;
-    }
-
-    // Process next in queue if nothing is currently upgrading
-    if (!isAnyUpgrading && readyMovies.length > 0) {
-      const nextMovie = readyMovies[0];
-      handleUpgrade(nextMovie.id);
-    }
-  }, [movies, isQueueActive]);
+    fetchQueueStatus();
+    interval = setInterval(fetchQueueStatus, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Polling for background tasks
   useEffect(() => {
@@ -268,10 +265,21 @@ export default function App() {
     }
   };
 
-  const handleUpgradeAll = () => {
+  const handleUpgradeAll = async () => {
     const readyMovies = movies.filter(m => m.status === 'magnet_found');
     if (readyMovies.length === 0 && !isQueueActive) return;
-    setIsQueueActive(!isQueueActive);
+    
+    try {
+      if (isQueueActive) {
+        await axios.post('/api/queue/stop');
+        setIsQueueActive(false);
+      } else {
+        await axios.post('/api/queue/start');
+        setIsQueueActive(true);
+      }
+    } catch (e: any) {
+      alert(e.response?.data?.error || "Error toggling queue");
+    }
   };
 
   const handleDelete = async (movie: Movie) => {
@@ -586,17 +594,16 @@ export default function App() {
                   </td>
                   <td className="px-4 py-3 text-slate-500 dark:text-slate-400 font-mono text-xs">
                     {movie.imdbId ? (
-                       <span 
-                         className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-500 dark:hover:text-red-400 transition-all border border-transparent hover:border-red-200 dark:hover:border-red-900/50 group relative shadow-sm"
-                         title={movie.tmdbTitle ? `TMDB: ${movie.tmdbTitle}\nClick to remove match` : "Click to remove match"}
-                         onClick={() => {
-                           if (confirm(`Remove match for "${movie.movieName}"?`)) {
-                             handleUnmatchTmdb(movie.id);
-                           }
+                       <button 
+                         className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-500 dark:hover:text-red-400 transition-all border border-slate-200 dark:border-slate-700/50 hover:border-red-200 dark:hover:border-red-900/50 group relative shadow-sm"
+                         title={movie.tmdbTitle ? `Matched to: ${movie.tmdbTitle}\nClick to unmatch` : "Click to unmatch"}
+                         onClick={(e) => {
+                           e.stopPropagation();
+                           handleUnmatchTmdb(movie.id);
                          }}
                        >
                          {movie.imdbId}
-                       </span>
+                       </button>
                     ) : '-'}
                   </td>
                   <td className="px-4 py-3">
@@ -673,11 +680,11 @@ export default function App() {
                   <StatusBadge movie={movie} />
                   {movie.imdbId && (
                     <button 
-                      className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 border border-transparent shadow-sm whitespace-nowrap active:bg-red-50 dark:active:bg-red-900/30 font-medium"
-                      onClick={() => {
-                        if (confirm(`Remove match for "${movie.movieName}"?`)) {
-                          handleUnmatchTmdb(movie.id);
-                        }
+                      className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 border border-slate-200 dark:border-slate-700/50 shadow-sm whitespace-nowrap active:bg-red-50 dark:active:bg-red-900/30 font-medium"
+                      title="Click to unmatch"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleUnmatchTmdb(movie.id);
                       }}
                     >
                       {movie.imdbId}
