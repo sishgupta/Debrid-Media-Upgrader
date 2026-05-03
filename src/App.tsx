@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, RefreshCw, Download, Trash2, Edit2, Play, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw, Ban, Terminal } from 'lucide-react';
+import { Search, RefreshCw, Download, Trash2, Edit2, Play, Pause, Settings2, Filter, HardDrive, Undo2, X, Fingerprint, Database, Check, RotateCcw, Ban, Terminal } from 'lucide-react';
 import axios from 'axios';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -164,7 +164,7 @@ export default function App() {
 
   // Polling for background tasks
   useEffect(() => {
-    const hasTransitionalMovies = movies.some(m => ['fetching_metadata', 'upgrading'].includes(m.status));
+    const hasTransitionalMovies = movies.some(m => ['fetching_metadata', 'upgrading', 'verifying_upgrade'].includes(m.status));
     
     if (hasTransitionalMovies || isQueueActive) {
       const interval = setInterval(fetchMovies, 3000);
@@ -244,6 +244,24 @@ export default function App() {
       await fetchMovies();
     } catch (e: any) {
       alert(e.response?.data?.error || e.message || "Error canceling upgrade");
+    }
+  };
+
+  const pauseUpgrade = async (movieId: number) => {
+    try {
+      await axios.post('/api/pause-upgrade', { movieId });
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error pausing upgrade");
+    }
+  };
+
+  const resumeUpgrade = async (movieId: number) => {
+    try {
+      await axios.post('/api/resume-upgrade', { movieId });
+      await fetchMovies();
+    } catch (e: any) {
+      alert(e.response?.data?.error || e.message || "Error resuming upgrade");
     }
   };
 
@@ -380,7 +398,7 @@ export default function App() {
   const filteredMovies = React.useMemo(() => {
     let result = movies.filter(m => {
       // Keep movies that are currently being upgraded or verifying always visible
-      if (['upgrading', 'verifying_upgrade'].includes(m.status)) return true;
+      if (['upgrading', 'paused', 'verifying_upgrade'].includes(m.status)) return true;
 
       if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) return false;
       if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) return false;
@@ -543,6 +561,7 @@ export default function App() {
       <option value="matched">Matched</option>
       <option value="magnet_found">Ready to Upgrade</option>
       <option value="upgrading">Upgrading</option>
+      <option value="paused">Paused</option>
       <option value="verifying_upgrade">Verifying Upgrade</option>
       <option value="upgraded">Upgraded</option>
     </select>
@@ -607,7 +626,7 @@ export default function App() {
                     ) : '-'}
                   </td>
                   <td className="px-4 py-3">
-                    <StatusBadge movie={movie} onCancel={() => cancelUpgrade(movie.id)} />
+                    <StatusBadge movie={movie} onCancel={() => cancelUpgrade(movie.id)} onPause={() => pauseUpgrade(movie.id)} onResume={() => resumeUpgrade(movie.id)} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -677,7 +696,7 @@ export default function App() {
 
               <div className="flex flex-wrap items-center justify-between pt-4 border-t border-slate-100 dark:border-slate-800 gap-y-3">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <StatusBadge movie={movie} />
+                  <StatusBadge movie={movie} onCancel={() => cancelUpgrade(movie.id)} onPause={() => pauseUpgrade(movie.id)} onResume={() => resumeUpgrade(movie.id)} />
                   {movie.imdbId && (
                     <button 
                       className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 border border-slate-200 dark:border-slate-700/50 shadow-sm whitespace-nowrap active:bg-red-50 dark:active:bg-red-900/30 font-medium"
@@ -1083,7 +1102,7 @@ export default function App() {
   );
 }
 
-function StatusBadge({ movie, onCancel }: { movie: Movie, onCancel?: () => void }) {
+function StatusBadge({ movie, onCancel, onPause, onResume }: { movie: Movie, onCancel?: () => void, onPause?: () => void, onResume?: () => void }) {
   switch (movie.status) {
     case 'fetching_metadata':
       return <span className="text-xs px-2 py-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500 border border-yellow-500/20 flex w-max items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin"/> Fetching Info</span>;
@@ -1095,12 +1114,33 @@ function StatusBadge({ movie, onCancel }: { movie: Movie, onCancel?: () => void 
     case 'magnet_found':
       return <span className="text-xs px-2 py-1 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">Ready to Upgrade</span>;
     case 'upgrading':
+    case 'paused':
+      const isPaused = movie.status === 'paused';
       return (
         <div className="flex flex-col gap-1.5 w-32">
-          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-wider flex justify-between items-center">
-            <span>Upgrading</span>
+          <span className="text-[10px] font-bold uppercase tracking-wider flex justify-between items-center text-indigo-600 dark:text-indigo-400">
+            <span>{isPaused ? 'Paused' : 'Upgrading'}</span>
             <div className="flex items-center gap-1.5">
               <span>{movie.progress || 0}%</span>
+              
+              {!isPaused && (
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onPause?.(); }}
+                  className="hover:text-amber-500 transition-colors cursor-pointer"
+                  title="Pause Upgrade"
+                >
+                  <Pause className="w-3 h-3" />
+                </button>
+              )}
+              {isPaused && (
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onResume?.(); }}
+                  className="hover:text-emerald-500 transition-colors cursor-pointer"
+                  title="Resume Upgrade"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                </button>
+              )}
               <button 
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1115,7 +1155,7 @@ function StatusBadge({ movie, onCancel }: { movie: Movie, onCancel?: () => void 
           </span>
           <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-1 overflow-hidden shadow-inner">
             <div 
-              className="bg-indigo-500 h-full transition-all duration-500 ease-out shadow-sm" 
+              className={cn("h-full transition-all duration-500 ease-out shadow-sm", isPaused ? "bg-slate-400 dark:bg-slate-500" : "bg-indigo-500")}
               style={{ width: `${movie.progress || 0}%` }}
             />
           </div>

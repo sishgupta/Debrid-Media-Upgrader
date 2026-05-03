@@ -10,15 +10,27 @@ ffmpeg.setFfprobePath(ffprobeStatic.path);
 const PORT = 3000;
 const DB_PATH = path.join(process.cwd(), "media_library.json");
 
+const LOG_FILE_PATH = path.join(process.cwd(), "server.log");
+
 // Internal log buffer
 const LOGS: string[] = [];
 const MAX_LOGS = 200;
+
+try {
+  if (fs.existsSync(LOG_FILE_PATH)) {
+    const fileLogs = fs.readFileSync(LOG_FILE_PATH, 'utf-8').trim().split('\n');
+    LOGS.push(...fileLogs.slice(-MAX_LOGS));
+  }
+} catch (e) {}
 
 function logToBuffer(level: string, message: string) {
   const timestamp = new Date().toISOString();
   const entry = `[${timestamp}] [${level}] ${message}`;
   LOGS.push(entry);
   if (LOGS.length > MAX_LOGS) LOGS.shift();
+  try {
+    fs.appendFileSync(LOG_FILE_PATH, entry + '\n');
+  } catch (e) {}
 }
 
 // Override console methods to capture logs
@@ -38,6 +50,21 @@ console.error = (...args: any[]) => {
   originalError(...args);
   logToBuffer('ERROR', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
 };
+
+process.on('SIGINT', () => {
+    console.log("[Server] Exiting: SIGINT received.");
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    console.log("[Server] Exiting: SIGTERM received.");
+    process.exit(0);
+});
+process.on('uncaughtException', (err) => {
+    console.error(`[Server] Uncaught Exception: ${err.message}`, err.stack);
+    process.exit(1);
+});
+
+console.log("[Server] Server application starting.");
 const SETTINGS_PATH = path.join(process.cwd(), "settings.json");
 
 interface AppSettings {
@@ -150,6 +177,15 @@ function loadDb() {
       if (db.length > 0) {
         nextId = Math.max(...db.map(m => m.id)) + 1;
       }
+      let dbChanged = false;
+      for (const movie of db) {
+        if (movie.status === 'upgrading') {
+          movie.status = 'paused';
+          dbChanged = true;
+          console.log(`[Boot] Found stuck upgrade for "${movie.movieName}" (server was closed). Adjusting state to paused.`);
+        }
+      }
+      if (dbChanged) saveDb();
     } catch (e) {
       console.error("Error reading db:", e);
       db = [];
@@ -197,8 +233,11 @@ async function runUpgrade(movieId: number) {
   const movie = db.find(m => m.id === Number(movieId));
   if (!movie || movie.status === 'upgrading') return;
 
+  const isResuming = movie.status === 'paused';
   movie.status = 'upgrading';
-  movie.progress = 0;
+  if (!isResuming) {
+    movie.progress = 0;
+  }
   saveDb();
   
   const isMock = movie.filePath.startsWith(MOCK_DIR);
@@ -206,7 +245,7 @@ async function runUpgrade(movieId: number) {
   if (isMock) {
     // --- SIMULATION MODE ---
     console.log(`[Upgrade] SIMULATING upgrade for MOCK movie "${movie.movieName}"`);
-    let currentProgress = 0;
+    let currentProgress = movie.progress || 0;
     const interval = setInterval(() => {
       const m = db.find(x => x.id === Number(movieId));
       if (!m || m.status !== 'upgrading') {
@@ -327,28 +366,74 @@ async function runUpgrade(movieId: number) {
 
   } catch (err: any) {
     activeDownloads.delete(movie.id);
-    if (err.name === 'AbortError') {
+    const abortReason = err.target?.reason || err.reason || 'canceled';
+    if (err.name === 'AbortError' && abortReason === 'paused') {
+      console.log(`[Upgrade] PAUSED upgrade for "${movie.movieName}"`);
+      movie.status = 'paused';
+      // keep staging file
+      saveDb();
+    } else if (err.name === 'AbortError') {
       console.log(`[Upgrade] CANCELED upgrade for "${movie.movieName}"`);
+      movie.status = 'magnet_found'; // Revert back so they can restart
+      movie.progress = 0;
+      
+      const oldPath = movie.filePath;
+      const parentDir = path.dirname(oldPath);
+      const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
+      const stagingFileName = baseFileName 
+        ? `${sanitizeFileName(baseFileName)}.tmp` 
+        : `download_staging_${movie.id}.tmp`;
+      const stagingPath = path.join(parentDir, stagingFileName);
+      try { if (fs.existsSync(stagingPath)) fs.unlinkSync(stagingPath); } catch(e) {}
+      
+      saveDb();
     } else {
       console.error(`[Upgrade] ERROR for "${movie.movieName}":`, err);
+      // Wait, failure could be temporary, let's just 'pause' it or put it in an error state we can resume.
+      // Easiest is just to log it and allow resume by setting to paused.
+      movie.status = 'paused'; 
+      saveDb();
     }
-    movie.status = 'indexed';
-    movie.progress = 0;
-    saveDb();
   }
 }
 async function downloadFile(url: string, destPath: string, onProgress: (progress: number) => void, signal: AbortSignal): Promise<void> {
-  const response = await fetch(url, { signal });
-  if (!response.ok) {
+
+  let existingSize = 0;
+  if (fs.existsSync(destPath)) {
+    existingSize = fs.statSync(destPath).size;
+  }
+
+  const headers: HeadersInit = {};
+  if (existingSize > 0) {
+    headers['Range'] = `bytes=${existingSize}-`;
+  }
+
+  const response = await fetch(url, { headers, signal });
+  if (!response.ok && response.status !== 206) {
     throw new Error(`Failed to download: ${response.statusText}`);
   }
 
-  const totalSize = Number(response.headers.get('content-length')) || 0;
+  let totalSize = Number(response.headers.get('content-length')) || 0;
+  let isResuming = response.status === 206;
+  
+  if (isResuming) {
+    const contentRange = response.headers.get('content-range');
+    if (contentRange) {
+        const match = contentRange.match(/\/(\d+)$/);
+        if (match) totalSize = Number(match[1]);
+    } else {
+        totalSize += existingSize;
+    }
+  } else if (existingSize > 0) {
+      // Server did not support range, start from zero
+      existingSize = 0; 
+  }
+
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Could not get reader from response body");
 
-  const writer = fs.createWriteStream(destPath);
-  let downloadedSize = 0;
+  const writer = fs.createWriteStream(destPath, { flags: isResuming ? 'a' : 'w' });
+  let downloadedSize = existingSize;
 
   try {
     while (true) {
@@ -360,12 +445,20 @@ async function downloadFile(url: string, destPath: string, onProgress: (progress
       
       if (totalSize > 0) {
         const progress = Math.round((downloadedSize / totalSize) * 100);
-        onProgress(progress);
+        onProgress(Math.min(progress, 99)); // Keep at 99 until truly done
       }
     }
+    
+    // Server exit handle or power outage handle
+    // On process exit, the stream might abrupt or the reader might throw an error.
+    if (totalSize > 0 && downloadedSize < totalSize) {
+       console.warn(`[Download] Incomplete download. Expected ${totalSize}, got ${downloadedSize}`);
+       throw new Error("Incomplete download");
+    }
+
   } catch (err) {
     writer.destroy();
-    if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+    // we do not unlink destPath here anymore because we want to be able to resume
     throw err;
   } finally {
     writer.end();
@@ -412,15 +505,16 @@ function getMediaMetadata(filePath: string): Promise<any> {
 
 // --- TMDB Rate Limiting & Fetching ---
 const TMDB_DELAY_MS = 250; // Max 4 req/sec
-let lastTmdbCall = 0;
+let nextTmdbCallTime = 0;
 
 async function tmdbFetch(url: string) {
   const now = Date.now();
-  const timeSinceLast = now - lastTmdbCall;
-  if (timeSinceLast < TMDB_DELAY_MS) {
-    await new Promise(r => setTimeout(r, TMDB_DELAY_MS - timeSinceLast));
+  const waitTime = Math.max(0, nextTmdbCallTime - now);
+  nextTmdbCallTime = now + waitTime + TMDB_DELAY_MS;
+  
+  if (waitTime > 0) {
+    await new Promise(r => setTimeout(r, waitTime));
   }
-  lastTmdbCall = Date.now();
   
   const options: RequestInit = {
     method: 'GET',
@@ -480,7 +574,7 @@ async function fetchImdbId(movieName: string, year: string): Promise<{ imdbId: s
 
 // --- AIOStreams Rate Limiting, Fetching & Caching ---
 const AIOSTREAMS_DELAY_MS = 1000; // Let's be polite: 1 req/sec
-let lastAiostreamsCall = 0;
+let nextAiostreamsCallTime = 0;
 
 const AIOSTREAMS_CACHE_PATH = path.join(process.cwd(), "aiostreams_cache.json");
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
@@ -543,12 +637,20 @@ async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
     throw new Error("AIOSTREAMS_URL is not set in environment");
   }
 
-  const now = Date.now();
-  const timeSinceLast = now - lastAiostreamsCall;
-  if (timeSinceLast < AIOSTREAMS_DELAY_MS) {
-    await new Promise(r => setTimeout(r, AIOSTREAMS_DELAY_MS - timeSinceLast));
+  const reqNow = Date.now();
+  const waitTime = Math.max(0, nextAiostreamsCallTime - reqNow);
+  nextAiostreamsCallTime = reqNow + waitTime + AIOSTREAMS_DELAY_MS;
+  
+  if (waitTime > 0) {
+    await new Promise(r => setTimeout(r, waitTime));
+    
+    // Check cache again after wait
+    const cachedAfterWait = aiostreamsCache[imdbId];
+    if (!forceRefresh && cachedAfterWait && (Date.now() - cachedAfterWait.timestamp < CACHE_TTL_MS)) {
+      console.log(`[Cache] HIT after wait for ${imdbId}. Skipping network call.`);
+      return cachedAfterWait.data;
+    }
   }
-  lastAiostreamsCall = Date.now();
   
   // Clean trailing slash
   const url = `${baseUrl.replace(/\/$/, '')}/stream/movie/${imdbId}.json`;
@@ -633,6 +735,7 @@ async function startServer() {
         streamMaxBitrate: streamMaxBitrate ?? settingsCache.streamMaxBitrate,
         theme: theme ?? settingsCache.theme,
       });
+      console.log(`[API] Settings updated successfully.`);
       // Ensure new target dir exists
       if (settingsCache.targetFolder !== oldTarget && !fs.existsSync(settingsCache.targetFolder)) {
         fs.mkdirSync(settingsCache.targetFolder, { recursive: true });
@@ -657,6 +760,7 @@ async function startServer() {
 
   app.post("/api/scan", async (req, res) => {
     try {
+      console.log("[API] Scan of local media folder requested");
       const mediaDir = getMediaDir();
       if (!fs.existsSync(mediaDir)) {
          return res.status(400).json({ error: "Target folder does not exist" });
@@ -1017,19 +1121,67 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cancel-upgrade", (req, res) => {
+  app.post("/api/pause-upgrade", (req, res) => {
     const { movieId } = req.body;
+    console.log(`[API] Pause requested for Movie ID: ${movieId}`);
     const controller = activeDownloads.get(Number(movieId));
     if (controller) {
-      controller.abort();
-      res.json({ success: true, message: "Download cancellation sent" });
+      // Aborting the fetch signal will throw AbortError
+      // Our catch block will see AbortError and mark as 'paused'
+      controller.abort("paused");
+      res.json({ success: true, message: "Download paused" });
     } else {
       const movie = db.find(m => m.id === Number(movieId));
       if (movie && movie.status === 'upgrading') {
-        movie.status = 'indexed';
-        movie.progress = 0;
+        movie.status = 'paused';
         saveDb();
-        res.json({ success: true, message: "Simulation canceled" });
+        res.json({ success: true, message: "Simulation paused" });
+      } else {
+        res.status(404).json({ error: "No active download found" });
+      }
+    }
+  });
+
+  app.post("/api/resume-upgrade", async (req, res) => {
+    const { movieId } = req.body;
+    console.log(`[API] Resume requested for Movie ID: ${movieId}`);
+    try {
+      const movie = db.find(m => m.id === Number(movieId));
+      if (!movie) return res.status(404).json({ error: "Movie not found" });
+      if (movie.status !== 'paused') return res.status(400).json({ error: "Not paused" });
+      
+      runUpgrade(Number(movieId)).catch(err => console.error("Async resume error:", err));
+      res.json({ success: true, message: "Upgrade resumed" });
+    } catch (error) {
+       res.status(500).json({ error: String(error) });
+    }
+  });
+
+  app.post("/api/cancel-upgrade", (req, res) => {
+    const { movieId } = req.body;
+    console.log(`[API] Cancel requested for Movie ID: ${movieId}`);
+    const controller = activeDownloads.get(Number(movieId));
+    if (controller) {
+      controller.abort("canceled");
+      res.json({ success: true, message: "Download cancellation sent" });
+    } else {
+      const movie = db.find(m => m.id === Number(movieId));
+      if (movie && (movie.status === 'upgrading' || movie.status === 'paused')) {
+        movie.status = 'magnet_found'; // Revert state so they can try again if they want
+        movie.progress = 0;
+        
+        // Remove temp file
+        const oldPath = movie.filePath;
+        const parentDir = path.dirname(oldPath);
+        const baseFileName = movie.upgradeMeta?.filename || movie.upgradeMeta?.streamName;
+        const stagingFileName = baseFileName 
+          ? `${sanitizeFileName(baseFileName)}.tmp` 
+          : `download_staging_${movie.id}.tmp`;
+        const stagingPath = path.join(parentDir, stagingFileName);
+        try { if (fs.existsSync(stagingPath)) fs.unlinkSync(stagingPath); } catch(e) {}
+        
+        saveDb();
+        res.json({ success: true, message: "Download canceled" });
       } else {
         res.status(404).json({ error: "No active download found" });
       }
