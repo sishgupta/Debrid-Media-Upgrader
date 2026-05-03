@@ -88,9 +88,7 @@ function sanitizeFileName(name: string): string {
   return name
     .replace(/[\u{1F300}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E0}-\u{1F1FF}]/gu, '') // Remove emojis and symbols
     .replace(/[<>:"/\\|?*]/g, '_') // Replace illegal chars with underscore
-    .replace(/\s+/g, '.') // Replace spaces (and multiple spaces) with dots
-    .replace(/\.+/g, '.') // Collapse multiple dots
-    .replace(/^\.+|\.+$/g, '') // Trim dots from ends
+    .replace(/\s+/g, ' ') // Preserve spaces (collapse multiple to one)
     .trim();
 }
 
@@ -231,7 +229,12 @@ async function runUpgrade(movieId: number) {
         const finalPath = path.join(parentDir, finalFileName);
 
         try {
-          if (fs.existsSync(oldPath)) fs.renameSync(oldPath, oldPath + '.bak');
+          if (fs.existsSync(oldPath)) {
+            const backupPath = oldPath + '.bak';
+            fs.renameSync(oldPath, backupPath);
+            m.oldFilePath = backupPath;
+            m.oldMeta = { resolution: m.resolution, bitrate: m.bitrate, fileSize: m.fileSize, hdr: m.hdr };
+          }
           fs.writeFileSync(finalPath, "upgraded mock data");
           m.filePath = finalPath;
           m.fileName = finalFileName;
@@ -1067,7 +1070,7 @@ async function startServer() {
         }
 
         // Restore the old file
-        const finalOldPath = movie.oldFilePath.replace('.bak', '');
+        const finalOldPath = movie.oldFilePath.replace(/(\.\d+)?\.bak$/, "");
         fs.renameSync(movie.oldFilePath, finalOldPath);
         
         movie.filePath = finalOldPath;
