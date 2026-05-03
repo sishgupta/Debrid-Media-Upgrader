@@ -136,7 +136,35 @@ function saveDb() {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-// Helper to extract metadata via ffprobe
+// Helper to delete companion subtitle files
+function deleteCompanionSubtitles(videoPath: string) {
+  try {
+    const dir = path.dirname(videoPath);
+    const fileName = path.basename(videoPath);
+    const baseName = path.basename(fileName, path.extname(fileName));
+    const files = fs.readdirSync(dir);
+    const subExts = ['.srt', '.sub', '.ass', '.vtt', '.idx'];
+    
+    for (const f of files) {
+      // Check if file starts with the same basename and has a subtitle extension
+      // This handles "Movie.srt", "Movie.en.srt", etc.
+      if (f.startsWith(baseName)) {
+        const lowerF = f.toLowerCase();
+        if (subExts.some(ext => lowerF.endsWith(ext))) {
+          const subPath = path.join(dir, f);
+          if (fs.existsSync(subPath)) {
+            fs.unlinkSync(subPath);
+            console.log(`[File] Deleted companion subtitle: ${subPath}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Error deleting companion subtitles:", e);
+  }
+}
+
+// Help extract metadata via ffprobe
 function getMediaMetadata(filePath: string): Promise<any> {
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
@@ -425,6 +453,13 @@ async function startServer() {
         const filePath = path.join(mediaDir, file);
         const stat = fs.statSync(filePath);
         if (!stat.isFile()) continue;
+
+        // SKIP SUBTITLES
+        const lowerFile = file.toLowerCase();
+        const subExts = ['.srt', '.sub', '.ass', '.vtt', '.idx'];
+        if (subExts.some(ext => lowerFile.endsWith(ext))) {
+          continue;
+        }
 
         // Parse Name & Year
         let baseName = path.basename(file, path.extname(file));
@@ -737,6 +772,9 @@ async function startServer() {
 
               // 3. Backup the old file
               if (fs.existsSync(oldPath)) {
+                // Delete companion subtitles for the old file
+                deleteCompanionSubtitles(oldPath);
+                
                 const backupPath = oldPath + '.bak';
                 fs.renameSync(oldPath, backupPath);
                 m.oldFilePath = backupPath;
@@ -935,20 +973,11 @@ async function startServer() {
         const movie = db[movieIndex];
         console.log(`[Delete] User requested deletion of movie ID ${id} ("${movie?.movieName}")`);
         if (movie && fs.existsSync(movie.filePath)) {
+           // Delete companion subtitles
+           deleteCompanionSubtitles(movie.filePath);
+           
            fs.unlinkSync(movie.filePath);
            console.log(`[File] Deleted primary file: ${movie.filePath}`);
-           
-           // Delete associated subtitles (e.g. identical name with .srt, .en.srt)
-           const dir = path.dirname(movie.filePath);
-           const baseName = path.basename(movie.fileName, path.extname(movie.fileName));
-           const files = fs.readdirSync(dir);
-           for (const f of files) {
-             if (f.startsWith(baseName) && (f.endsWith('.srt') || f.endsWith('.sub'))) {
-               const subPath = path.join(dir, f);
-               fs.unlinkSync(subPath);
-               console.log(`[File] Deleted companion file: ${subPath}`);
-             }
-           }
         }
         db.splice(movieIndex, 1);
         saveDb();

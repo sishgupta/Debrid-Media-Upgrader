@@ -393,7 +393,7 @@ export default function App() {
             <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-600 dark:text-indigo-400">
               <HardDrive className="w-6 h-6" />
             </div>
-            <h1 className="text-xl md:text-2xl font-semibold text-slate-900 dark:text-slate-100 tracking-tight">Media Upgrader</h1>
+            <h1 className="text-xl md:text-2xl font-semibold text-slate-900 dark:text-slate-100 tracking-tight">Debrid Media Upgrader</h1>
           </div>
           <div className="flex items-center gap-2 md:gap-4">
             <button 

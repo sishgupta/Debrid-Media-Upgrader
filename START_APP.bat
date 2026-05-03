@@ -1,42 +1,54 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 :: Ensure we are running from the script's directory
 cd /d "%~dp0"
 
 echo ======================================================
-echo STARTING DEBRID MEDIA UPGRADER
+echo STEP 2: SETUP AND START APPLICATION
 echo ======================================================
 echo.
 
-:: 1. Check for Git updates
-echo Checking for updates...
-git pull 2>nul
-if %errorLevel% equ 0 (
-    echo [OK] Code is up to date.
+:: 1. Verify Git Installation
+where git >nul 2>nul
+if %errorLevel% neq 0 (
+    echo [ERROR] Git is not installed or not in your PATH.
+    echo Please run INSTALL_DEPENDENCIES.bat and RESTART your CMD window.
+    pause
+    exit /b 1
+)
+
+:: 2. Check if we need to download the source code
+if not exist package.json (
+    echo [NOTICE] Source code not found. Initializing repository...
+    git init
+    git remote add origin https://github.com/sishgupta/Debrid-Media-Upgrader.git
+    git fetch
+    git checkout -f main
+    if errorlevel 1 (
+        echo [ERROR] Failed to download source code.
+        pause
+        exit /b 1
+    )
 ) else (
-    echo [INFO] Skipping update check (Git sync not available here).
+    echo [INFO] Source code detected. Checking for updates...
+    git pull
 )
 
 echo.
 
-:: 2. Initial Setup: Environment Variables
-if not exist ".env" (
-    if exist ".env.example" (
-        echo [NOTICE] Generating .env from example...
-        copy ".env.example" ".env" >nul
-        echo Please edit your .env file to add your API keys.
-    ) else (
-        echo [NOTICE] Generating empty .env...
-        echo # Add your API keys here > .env
-        echo TMDB_API_KEY=>> .env
-        echo AIOSTREAMS_URL=>> .env
-    )
+:: 3. Verify Node Installation
+where npm >nul 2>nul
+if %errorLevel% neq 0 (
+    echo [ERROR] Node.js/NPM is not installed or not in your PATH.
+    echo Please run INSTALL_DEPENDENCIES.bat and RESTART your CMD window.
+    pause
+    exit /b 1
 )
 
-:: 3. Initial Setup: Dependencies
-if not exist "node_modules\" (
-    echo [NOTICE] First time setup - installing components...
+:: 5. Install Dependencies
+if not exist node_modules (
+    echo [NOTICE] First time setup: Installing components...
     echo This may take a few minutes.
     call npm install
 )
@@ -45,7 +57,7 @@ echo.
 echo Starting application...
 echo.
 
-:: 4. Run the app
+:: 6. Run the app
 call npm run dev
 
 pause
