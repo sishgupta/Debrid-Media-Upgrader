@@ -69,7 +69,7 @@ export default function App() {
     streamAudioFilter: 'All',
     streamMinBitrate: 0,
     streamMaxBitrate: 100,
-    streamCacheExpiryDays: 1,
+    streamCacheExpiryMinutes: 1440,
     theme: 'dark' as 'light' | 'dark' | 'system'
   });
   const [streamSelectorData, setStreamSelectorData] = useState<{movieId: number, streams: any[]} | null>(null);
@@ -651,7 +651,9 @@ export default function App() {
                   </td>
                   <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{formatBytes(movie.fileSize)}</td>
                   <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{movie.resolution}</td>
-                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{(movie.bitrate / 1000).toFixed(0)} kbps</td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
+                    {movie.bitrate > 0 ? `${(movie.bitrate / 1000).toFixed(0)} kbps` : '-'}
+                  </td>
                   <td className="px-4 py-3 text-center">
                     {movie.hdr ? (
                       <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20">HDR</span>
@@ -738,7 +740,9 @@ export default function App() {
                 </div>
                 <div className="flex flex-col">
                   <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Bitrate</span>
-                  <span className="text-slate-700 dark:text-slate-300 font-medium">{(movie.bitrate / 1000).toFixed(0)} kbps</span>
+                  <span className="text-slate-700 dark:text-slate-300 font-medium">
+                    {movie.bitrate > 0 ? `${(movie.bitrate / 1000).toFixed(0)} kbps` : 'N/A'}
+                  </span>
                 </div>
               </div>
 
@@ -912,21 +916,28 @@ export default function App() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">Stream Cache Expiry (Days)</label>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">Stream Cache Expiry</label>
                 <div className="flex items-center gap-4">
                   <input 
                     type="range" 
                     min="1" 
-                    max="30" 
+                    max="1440" 
                     step="1"
-                    value={settingsForm.streamCacheExpiryDays}
-                    onChange={e => setSettingsForm({...settingsForm, streamCacheExpiryDays: parseInt(e.target.value)})}
+                    value={settingsForm.streamCacheExpiryMinutes}
+                    onChange={e => setSettingsForm({...settingsForm, streamCacheExpiryMinutes: parseInt(e.target.value)})}
                     className="flex-1 accent-indigo-500"
                   />
-                  <span className="text-sm font-medium text-slate-700 dark:text-slate-200 w-8">{settingsForm.streamCacheExpiryDays}</span>
+                  <span className="text-sm font-medium text-slate-700 dark:text-slate-200 min-w-[4rem] text-right">
+                    {settingsForm.streamCacheExpiryMinutes === 1440 
+                      ? "1 day" 
+                      : settingsForm.streamCacheExpiryMinutes >= 60 
+                        ? `${Math.floor(settingsForm.streamCacheExpiryMinutes / 60)}h${settingsForm.streamCacheExpiryMinutes % 60 > 0 ? ` ${settingsForm.streamCacheExpiryMinutes % 60}m` : ""}`
+                        : `${settingsForm.streamCacheExpiryMinutes}m`
+                    }
+                  </span>
                 </div>
                 <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">
-                  How long to keep stream search results in cache.
+                  How long to keep stream search results in cache (1m to 1 day).
                 </p>
               </div>
 

@@ -64,7 +64,7 @@ interface AppSettings {
   streamAudioFilter: string;
   streamMinBitrate: number;
   streamMaxBitrate: number;
-  streamCacheExpiryDays: number;
+  streamCacheExpiryMinutes: number;
   theme: 'system' | 'light' | 'dark';
 }
 
@@ -77,7 +77,7 @@ let settingsCache: AppSettings = {
   streamAudioFilter: "All",
   streamMinBitrate: 0,
   streamMaxBitrate: 100,
-  streamCacheExpiryDays: 1,
+  streamCacheExpiryMinutes: 1440,
   theme: 'dark'
 };
 
@@ -525,7 +525,19 @@ function getMediaMetadata(filePath: string): Promise<any> {
 
       if (videoStream) {
         resolution = `${videoStream.width}x${videoStream.height}`;
-        bitrate = videoStream.bit_rate ? Number(videoStream.bit_rate) : (metadata.format.bit_rate ? Number(metadata.format.bit_rate) : 0);
+        
+        let br = videoStream.bit_rate ? Number(videoStream.bit_rate) : (metadata.format.bit_rate ? Number(metadata.format.bit_rate) : 0);
+        
+        // If bitrate is missing from both stream and format, calculate it from duration and fileSize
+        if (!br && metadata.format.duration && metadata.format.size) {
+            const duration = Number(metadata.format.duration);
+            const size = Number(metadata.format.size);
+            if (duration > 0) {
+                br = (size * 8) / duration;
+            }
+        }
+        
+        bitrate = br;
         
         // Simple HDR detection based on color space / transfer characteristics
         if (videoStream.color_transfer && ['smpte2084', 'arib-std-b67'].includes(videoStream.color_transfer.toString())) {
@@ -687,7 +699,7 @@ function loadAiostreamsCache() {
       const now = Date.now();
       const cleaned: Record<string, { timestamp: number; data: any }> = {};
       let removedCount = 0;
-      const ttlMs = (settingsCache.streamCacheExpiryDays || 1) * 1000 * 60 * 60 * 24;
+      const ttlMs = (settingsCache.streamCacheExpiryMinutes || 1440) * 1000 * 60;
       for (const [id, entry] of Object.entries(aiostreamsCache)) {
         if (now - entry.timestamp < ttlMs * 7) { 
           cleaned[id] = entry;
@@ -736,7 +748,7 @@ async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
   console.log(`[Search] Function entry. Using AIOStreams Base URL: ${baseUrl}`);
 
   const cached = aiostreamsCache[imdbId];
-  const ttlMs = (settingsCache.streamCacheExpiryDays || 1) * 1000 * 60 * 60 * 24;
+  const ttlMs = (settingsCache.streamCacheExpiryMinutes || 1440) * 1000 * 60;
 
   if (!forceRefresh && cached) {
     const age = Date.now() - cached.timestamp;
@@ -901,7 +913,7 @@ async function startServer() {
 
   app.post("/api/settings", (req, res) => {
     try {
-      const { tmdbApiKey, aiostreamsUrl, targetFolder, streamResFilter, streamVideoFilter, streamAudioFilter, streamMinBitrate, streamMaxBitrate, streamCacheExpiryDays, theme } = req.body;
+      const { tmdbApiKey, aiostreamsUrl, targetFolder, streamResFilter, streamVideoFilter, streamAudioFilter, streamMinBitrate, streamMaxBitrate, streamCacheExpiryMinutes, theme } = req.body;
       const oldTarget = settingsCache.targetFolder;
       saveSettings({ 
         tmdbApiKey: tmdbApiKey ?? settingsCache.tmdbApiKey,
@@ -912,7 +924,7 @@ async function startServer() {
         streamAudioFilter: streamAudioFilter ?? settingsCache.streamAudioFilter,
         streamMinBitrate: streamMinBitrate ?? settingsCache.streamMinBitrate,
         streamMaxBitrate: streamMaxBitrate ?? settingsCache.streamMaxBitrate,
-        streamCacheExpiryDays: streamCacheExpiryDays ?? settingsCache.streamCacheExpiryDays,
+        streamCacheExpiryMinutes: streamCacheExpiryMinutes ?? settingsCache.streamCacheExpiryMinutes,
         theme: theme ?? settingsCache.theme,
       });
       console.log(`[API] Settings updated successfully.`);
