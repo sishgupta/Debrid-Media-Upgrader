@@ -1659,23 +1659,9 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-
-  const forceShutdown = async () => {
-    console.log("\n[Server] Shutting down handles and exiting...");
-    let exitTimeout = setTimeout(() => process.exit(0), 1000);
-    exitTimeout.unref();
-
-    if (viteServer) {
-      try { await viteServer.close(); } catch (e) {}
-    }
-    
-    server.close(() => {
-      console.log("[Server] Server stopped cleanly.");
-      process.exit(0);
-    });
+  const forceShutdown = () => {
+    console.log("\n[Server] Shutting down immediately...");
+    process.exit(0);
   };
 
   process.removeAllListeners('SIGINT');
@@ -1688,8 +1674,54 @@ async function startServer() {
     process.exit(1);
   });
 
-  // Stdin handling often interferes with Windows terminal state
-  console.log("[Server] Press Ctrl+C to stop the server.");
+  // Simple input handling that reads non-raw raw input to avoid dropping to prompt on windows.
+  // We'll just listen to data events.
+  process.stdin.on('data', (data) => {
+    const str = data.toString().trim().toLowerCase();
+    if (str === 'q' || str === 'exit' || str === 'quit' || str === '\u0003') {
+      forceShutdown();
+    }
+  });
+
+  console.log("[Server] Type 'q' and press Enter to stop the server.");
+
+  const startListening = () => {
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+
+    server.on('error', (e: any) => {
+      if (e.code === 'EADDRINUSE') {
+        console.error(`\n[Server] Port ${PORT} is still in use!`);
+        console.error(`[Server] Trying to forcefully kill the zombie process holding the port...`);
+        try {
+          const { execSync } = require('child_process');
+          if (process.platform === 'win32') {
+            const output = execSync(`netstat -ano | findstr :${PORT}`).toString();
+            const lines = output.split('\n').filter((l: string) => l.trim().length > 0 && l.includes('LISTENING'));
+            if (lines.length > 0) {
+              const parts = lines[0].trim().split(/\s+/);
+              const pid = parts[parts.length - 1];
+              if (pid) {
+                console.log(`[Server] Killing PID ${pid}...`);
+                execSync(`taskkill /F /PID ${pid} >nul 2>&1`);
+                console.log(`[Server] Killed. Restarting server...`);
+                setTimeout(startListening, 1000);
+                return;
+              }
+            }
+          }
+        } catch (killErr) {
+          console.error(`[Server] Failed to kill zombie process. Please reboot or run 'taskkill'.`);
+        }
+        process.exit(1);
+      }
+    });
+
+    return server;
+  };
+
+  const server = startListening();
 
   // Background Queue Worker
   setInterval(async () => {
