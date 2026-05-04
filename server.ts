@@ -205,7 +205,7 @@ function saveDb() {
 }
 
 // Helper to delete companion subtitle files
-function deleteCompanionSubtitles(videoPath: string) {
+function deleteCompanionSubtitles(videoPath: string, reason: string = "") {
   try {
     const dir = path.dirname(videoPath);
     const fileName = path.basename(videoPath);
@@ -220,7 +220,7 @@ function deleteCompanionSubtitles(videoPath: string) {
           const subPath = path.join(dir, f);
           if (fs.existsSync(subPath)) {
             fs.unlinkSync(subPath);
-            console.log(`[File] Deleted companion subtitle: ${subPath}`);
+            console.log(`[File] Deleted companion subtitle: ${subPath}${reason ? ' - Reason: ' + reason : ''}`);
           }
         }
       }
@@ -305,8 +305,6 @@ async function runUpgrade(movieId: number) {
     if (movie.year) nameSegments.push(`(${movie.year})`);
     const finalFileName = sanitizeFileName(nameSegments.join(' ')) + extension;
     const finalPath = path.join(parentDir, finalFileName);
-
-    deleteCompanionSubtitles(oldPath);
 
     if (fs.existsSync(oldPath)) {
       let backupPath = oldPath + '.bak';
@@ -979,7 +977,7 @@ async function startServer() {
 
   app.post("/api/scan", async (req, res) => {
     try {
-      console.log("[API] Scan of local media folder requested");
+      console.log("[API] Scan of local media folder requested via UI by user");
       const mediaDir = getMediaDir();
       if (!fs.existsSync(mediaDir)) {
          return res.status(400).json({ error: "Target folder does not exist" });
@@ -1163,7 +1161,7 @@ async function startServer() {
     const movie = db.find(m => m.id === movieId);
     if (!movie) return res.status(404).json({ error: "Movie not found" });
 
-    console.log(`[API] Manual TMDB match requested for "${movie.movieName}" (ID: ${movieId})`);
+    console.log(`[API] Manual TMDB match requested via UI for "${movie.movieName}" (ID: ${movieId})`);
 
     try {
       if (!movie.movieName) {
@@ -1200,7 +1198,7 @@ async function startServer() {
       return res.status(400).json({ error: "Cannot unmatch while movie is being upgraded" });
     }
 
-    console.log(`[TMDB] Removing match for "${movie.movieName}" (Old IMDB: ${movie.imdbId})`);
+    console.log(`[TMDB] Removing match for "${movie.movieName}" (Old IMDB: ${movie.imdbId}) via UI`);
     movie.imdbId = null;
     movie.tmdbTitle = undefined;
     
@@ -1428,7 +1426,7 @@ async function startServer() {
 
   app.post("/api/pause-upgrade", (req, res) => {
     const { movieId } = req.body;
-    console.log(`[API] Pause requested for Movie ID: ${movieId}`);
+    console.log(`[API] Pause requested via UI for Movie ID: ${movieId}`);
     const controller = activeDownloads.get(Number(movieId));
     if (controller) {
       // Aborting the fetch signal will throw AbortError
@@ -1449,7 +1447,7 @@ async function startServer() {
 
   app.post("/api/resume-upgrade", async (req, res) => {
     const { movieId } = req.body;
-    console.log(`[API] Resume requested for Movie ID: ${movieId}`);
+    console.log(`[API] Resume requested via UI for Movie ID: ${movieId}`);
     try {
       const movie = db.find(m => m.id === Number(movieId));
       if (!movie) return res.status(404).json({ error: "Movie not found" });
@@ -1464,7 +1462,7 @@ async function startServer() {
 
   app.post("/api/cancel-upgrade", (req, res) => {
     const { movieId } = req.body;
-    console.log(`[API] Cancel requested for Movie ID: ${movieId}`);
+    console.log(`[API] Cancel requested via UI for Movie ID: ${movieId}`);
     const controller = activeDownloads.get(Number(movieId));
     if (controller) {
       controller.abort("canceled");
@@ -1497,10 +1495,15 @@ async function startServer() {
     if (!movie) return res.status(404).json({ error: "Movie not found" });
 
     try {
-      // Purge backup
-      if (movie.oldFilePath && fs.existsSync(movie.oldFilePath)) {
-        fs.unlinkSync(movie.oldFilePath);
-        console.log(`Purged backup: ${movie.oldFilePath}`);
+      // Purge backup and its companion subtitles
+      if (movie.oldFilePath) {
+        const originalOldPath = movie.oldFilePath.replace(/(\.\d+)?\.bak$/, "");
+        deleteCompanionSubtitles(originalOldPath, "User verified upgrade");
+        
+        if (fs.existsSync(movie.oldFilePath)) {
+          fs.unlinkSync(movie.oldFilePath);
+          console.log(`[File] Purged backup: ${movie.oldFilePath} - Reason: User verified upgrade`);
+        }
       }
       movie.oldFilePath = undefined;
       movie.oldMeta = undefined;
@@ -1522,11 +1525,13 @@ async function startServer() {
         // Delete the "new" file we didn't like
         if (fs.existsSync(movie.filePath)) {
           fs.unlinkSync(movie.filePath);
+          console.log(`[File] Deleted unverified upgrade file: ${movie.filePath} - Reason: User rejected upgrade via UI`);
         }
 
         // Restore the old file
         const finalOldPath = movie.oldFilePath.replace(/(\.\d+)?\.bak$/, "");
         fs.renameSync(movie.oldFilePath, finalOldPath);
+        console.log(`[File] Restored backup file: ${movie.oldFilePath} to ${finalOldPath} - Reason: User rejected upgrade via UI`);
         
         movie.filePath = finalOldPath;
         movie.fileName = path.basename(finalOldPath);
@@ -1566,7 +1571,7 @@ async function startServer() {
         return res.status(400).json({error: "File already exists"});
       }
       
-      console.log(`[File] Renaming "${movie.fileName}" to "${newName}"`);
+      console.log(`[File] Renaming "${movie.fileName}" to "${newName}" via UI`);
       fs.renameSync(oldPath, newPath);
       movie.filePath = newPath;
       movie.fileName = newName;
@@ -1594,7 +1599,7 @@ async function startServer() {
     try {
       const movie = db.find(m => m.id === Number(movieId));
       if (movie) {
-        console.log(`[Revert] Resetting status for "${movie.movieName}" from "${movie.status}" back to "indexed"`);
+        console.log(`[Revert] Resetting status for "${movie.movieName}" from "${movie.status}" back to "indexed" via UI`);
         movie.status = 'indexed';
         movie.magnetLink = null;
         saveDb();
@@ -1612,12 +1617,23 @@ async function startServer() {
       if (movieIndex !== -1) {
         const movie = db[movieIndex];
         console.log(`[Delete] User requested deletion of movie ID ${id} ("${movie?.movieName}")`);
-        if (movie && fs.existsSync(movie.filePath)) {
-           // Delete companion subtitles
-           deleteCompanionSubtitles(movie.filePath);
+        if (movie) {
+           if (fs.existsSync(movie.filePath)) {
+             // Delete companion subtitles for the primary file
+             deleteCompanionSubtitles(movie.filePath, "User manually deleted movie via UI");
+             
+             fs.unlinkSync(movie.filePath);
+             console.log(`[File] Deleted primary file: ${movie.filePath} - Reason: User manually deleted movie via UI`);
+           }
            
-           fs.unlinkSync(movie.filePath);
-           console.log(`[File] Deleted primary file: ${movie.filePath}`);
+           if (movie.oldFilePath) {
+             const originalOldPath = movie.oldFilePath.replace(/(\.\d+)?\.bak$/, "");
+             deleteCompanionSubtitles(originalOldPath, "User manually deleted movie backup via UI");
+             if (fs.existsSync(movie.oldFilePath)) {
+               fs.unlinkSync(movie.oldFilePath);
+               console.log(`[File] Deleted backup file: ${movie.oldFilePath} - Reason: User manually deleted movie via UI`);
+             }
+           }
         }
         db.splice(movieIndex, 1);
         saveDb();
@@ -1648,43 +1664,53 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
-  const gracefulShutdown = () => {
+  let rl: readline.Interface | undefined;
+
+  const gracefulShutdown = async () => {
     console.log("\n[Server] Shutdown signal received. Closing server handles...");
     
-    // Stop reading input to allow process to exit
+    // CRITICAL: Close readline first to restore terminal state (fixes "weird shell" bug)
+    if (rl) {
+      rl.close();
+    }
+    
+    // Completely detatch from standard input
+    process.stdin.unref();
     process.stdin.pause();
     
     if (viteServer) {
-      viteServer.close().catch(() => {});
+      try { await viteServer.close(); } catch (e) {}
     }
     
     server.close(() => {
       console.log("[Server] HTTP server stopped.");
     });
     
-    // Force exit after a tiny delay to ensure logs are flushed but port is freed
+    // Force exit with slightly longer timeout to ensure Vite and handles clear gracefully
     setTimeout(() => {
-      console.log("[Server] Process exiting. (PID: " + process.pid + ")");
+      console.log("[Server] Process exiting cleanly. (PID: " + process.pid + ")");
       process.exit(0);
-    }, 200).unref();
+    }, 300).unref();
   };
 
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
 
-  process.on('SIGINT', gracefulShutdown);
-  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', () => gracefulShutdown());
+  process.on('SIGTERM', () => gracefulShutdown());
   process.on('uncaughtException', (err: Error) => {
     console.error(`[Server] UNCAUGHT EXCEPTION: ${err.message}`, err.stack);
+    if (rl) rl.close();
     process.exit(1);
   });
 
   // Dual-mode input handling for best compatibility
   const setupInput = () => {
-    const rl = readline.createInterface({
+    rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
-      terminal: false
+      // Setting terminal correctly ensures raw mode is used gracefully when available
+      terminal: !!process.stdin.isTTY
     });
 
     rl.on('line', (line) => {
@@ -1694,14 +1720,12 @@ async function startServer() {
       }
     });
 
-    // Special handling for Ctrl+C manually if needed, 
-    // though SIGINT process listener usually handles it when not in raw mode.
     rl.on('SIGINT', () => {
       gracefulShutdown();
     });
 
     if (process.stdin.isTTY) {
-      console.log("[Server] Interactive terminal detected. Type 'q' or Press Ctrl+C to stop.");
+      console.log("[Server] Interactive terminal detected. Type 'q' + Enter or Press Ctrl+C to stop.");
     } else {
       console.log("[Server] Pipe mode detected. Type 'q' + Enter to stop.");
     }
