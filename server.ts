@@ -1678,20 +1678,9 @@ async function startServer() {
     process.exit(1);
   });
 
-  // Simple input handling
-  const setupInput = () => {
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (data) => {
-      const input = data.toString().trim().toLowerCase();
-      if (input === 'q' || input === 'exit' || input === 'stop' || input === 'quit') {
-        forceShutdown();
-      }
-    });
-    
-    console.log("[Server] Type 'q' + Enter or press Ctrl+C to stop.");
-  };
-
-  setupInput();
+  // Stdin handling often interferes with Windows terminal state (raw mode bugs, hanging prompts).
+  // Rely exclusively on OS-level termination signals (Ctrl+C).
+  console.log("[Server] Press Ctrl+C to stop the server.");
 
   // Background Queue Worker
   setInterval(async () => {
