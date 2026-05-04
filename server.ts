@@ -182,10 +182,11 @@ function loadDb() {
           movie.fileName = path.basename(movie.filePath);
           dbChanged = true;
         }
-        if (movie.status === 'upgrading') {
-          movie.status = 'paused';
+        if (movie.status === 'upgrading' || movie.status === 'paused') {
+          console.log(`[Boot] Found stuck upgrade/pause for "${movie.movieName}" (ID: ${movie.id}). Resetting to matched/indexed.`);
+          movie.status = movie.imdbId ? 'matched' : 'indexed';
+          movie.progress = 0;
           dbChanged = true;
-          console.log(`[Boot] Found stuck upgrade for "${movie.movieName}" (server was closed). Adjusting state to paused.`);
         }
       }
       if (dbChanged) saveDb();

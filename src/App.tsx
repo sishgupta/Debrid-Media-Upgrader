@@ -211,7 +211,7 @@ export default function App() {
       await axios.post('/api/settings', settingsForm);
       setShowSettings(false);
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error saving settings");
+      setGlobalError(e.response?.data?.error || "Error saving settings");
     } finally {
       setModalLoading(false);
     }
@@ -335,7 +335,7 @@ export default function App() {
         setIsQueueActive(true);
       }
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error toggling queue");
+      setGlobalError(e.response?.data?.error || "Error toggling queue");
     }
   };
 
@@ -418,7 +418,7 @@ export default function App() {
       await axios.post(`/api/movie/${movieId}/unmatch`);
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error unmatching TMDB");
+      setGlobalError(e.response?.data?.error || "Error unmatching TMDB");
     }
   };
 
@@ -430,7 +430,7 @@ export default function App() {
       setResetConfirmMode(false);
       setShowSettings(false);
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error resetting database");
+      setGlobalError(e.response?.data?.error || "Error resetting database");
     } finally {
       setModalLoading(false);
     }
@@ -452,13 +452,21 @@ export default function App() {
 
   const filteredMovies = React.useMemo(() => {
     let result = movies.filter(m => {
-      // Keep movies that are currently being upgraded or verifying always visible
+      // Text search should be primary filter
+      if (fileNameFilter) {
+        const search = fileNameFilter.toLowerCase();
+        const matchesName = m.movieName?.toLowerCase().includes(search);
+        const matchesFile = m.fileName?.toLowerCase().includes(search);
+        if (!matchesName && !matchesFile) return false;
+      }
+
+      // Keep movies that are currently being upgraded or verifying always visible (within the search results)
       if (['upgrading', 'paused', 'verifying_upgrade'].includes(m.status)) return true;
 
       if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) return false;
       if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) return false;
       if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) return false;
-      if (fileNameFilter && !m.fileName.toLowerCase().includes(fileNameFilter.toLowerCase())) return false;
+      
       if (statusFilter) {
         if (statusFilter === 'matched') {
            if (m.status !== 'indexed' || !m.imdbId) return false;
@@ -489,7 +497,7 @@ export default function App() {
       });
     }
     return result;
-  }, [movies, maxResFilter, maxBitrateFilter, extFilter, statusFilter, sortConfig]);
+  }, [movies, maxResFilter, maxBitrateFilter, extFilter, statusFilter, sortConfig, fileNameFilter]);
 
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 Bytes';
@@ -675,18 +683,20 @@ export default function App() {
              <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
              <div className="flex-1">
                 <h4 className="text-sm font-bold text-red-800 dark:text-red-300">
-                  {globalError.includes("AIOStreams Error") ? "AIOStreams Problem" : 
-                   globalError.includes("AIOStreams URL") ? "Connection Setup Required" : 
+                  {globalError.includes("AIOStreams") ? "AIOStreams Problem" : 
+                   globalError.includes("TMDB") ? "TMDB Problem" : 
                    "Operation Error"}
                 </h4>
                 <p className="text-sm text-red-700 dark:text-red-400/80 mt-1">{globalError}</p>
                 <div className="mt-3 flex items-center gap-3">
-                   <button 
-                     onClick={() => { setShowSettings(true); setGlobalError(null); }}
-                     className="text-xs font-bold px-3 py-1.5 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 text-red-800 dark:text-red-200 rounded transition-colors"
-                   >
-                     Fix in Settings
-                   </button>
+                   {(globalError.toLowerCase().includes("tmdb") || globalError.toLowerCase().includes("aiostreams")) && (
+                     <button 
+                       onClick={() => { setShowSettings(true); setGlobalError(null); }}
+                       className="text-xs font-bold px-3 py-1.5 bg-red-100 dark:bg-red-900/50 hover:bg-red-200 dark:hover:bg-red-800 text-red-800 dark:text-red-200 rounded transition-colors"
+                     >
+                       Fix in Settings
+                     </button>
+                   )}
                    <button 
                      onClick={() => setGlobalError(null)}
                      className="text-xs font-medium text-red-600 dark:text-red-400 hover:underline"
