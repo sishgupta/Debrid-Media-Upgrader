@@ -53,6 +53,8 @@ export default function App() {
   const [maxBitrateFilter, setMaxBitrateFilter] = useState('');
   const [extFilter, setExtFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [fileNameFilter, setFileNameFilter] = useState('');
+  const [matchingMovies, setMatchingMovies] = useState<Set<number>>(new Set());
 
   const [sortConfig, setSortConfig] = useState<{ key: keyof Movie | null, direction: 'asc' | 'desc' }>({ key: null, direction: 'asc' });
 
@@ -79,6 +81,9 @@ export default function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isQueueActive, setIsQueueActive] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
+
+  const isTmdbConfigured = !!settingsForm.tmdbApiKey;
+  const isAiostreamsConfigured = !!settingsForm.aiostreamsUrl;
 
   const handleClearLogs = async () => {
     try {
@@ -186,14 +191,15 @@ export default function App() {
   }, [movies, isQueueActive]);
 
   const handleGenerateMocks = async () => {
+    setGlobalError(null);
     try {
       setModalLoading(true);
       const res = await axios.post('/api/generate-mocks');
-      alert(res.data.message || "Mock files generated successfully.");
+      setGlobalError(`Success: ${res.data.message || "Mock files generated."}`);
       fetchMovies();
       fetchSettings(); // Update target folder if it changed
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error generating mocks");
+      setGlobalError(e.response?.data?.error || "Error generating mocks");
     } finally {
       setModalLoading(false);
     }
@@ -225,6 +231,11 @@ export default function App() {
   };
 
   const handleSearch = async (movieId: number, force = false) => {
+    if (!isAiostreamsConfigured) {
+      setGlobalError("AIOStreams URL missing. Please configure it in Settings.");
+      setShowSettings(true);
+      return;
+    }
     setGlobalError(null);
     // Open modal in loading state immediately
     setStreamSelectorData({ movieId, streams: [], isLoading: true });
@@ -262,47 +273,52 @@ export default function App() {
   };
 
   const cancelUpgrade = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post('/api/cancel-upgrade', { movieId });
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error canceling upgrade");
+      setGlobalError(e.response?.data?.error || e.message || "Error canceling upgrade");
     }
   };
 
   const pauseUpgrade = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post('/api/pause-upgrade', { movieId });
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error pausing upgrade");
+      setGlobalError(e.response?.data?.error || e.message || "Error pausing upgrade");
     }
   };
 
   const resumeUpgrade = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post('/api/resume-upgrade', { movieId });
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error resuming upgrade");
+      setGlobalError(e.response?.data?.error || e.message || "Error resuming upgrade");
     }
   };
 
   const handleAcceptUpgrade = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post(`/api/movie/${movieId}/accept-upgrade`);
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error accepting upgrade");
+      setGlobalError(e.response?.data?.error || "Error accepting upgrade");
     }
   };
 
   const handleRevertUpgrade = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post(`/api/movie/${movieId}/revert-upgrade`);
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error reverting upgrade");
+      setGlobalError(e.response?.data?.error || "Error reverting upgrade");
     }
   };
 
@@ -357,27 +373,43 @@ export default function App() {
       await fetchMovies();
       setMovieToRename(null);
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error renaming file");
+      setGlobalError(e.response?.data?.error || "Error renaming file");
     } finally {
       setModalLoading(false);
     }
   };
 
   const handleRevert = async (movieId: number) => {
+    setGlobalError(null);
     try {
       await axios.post('/api/revert', { movieId });
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || e.message || "Error reverting");
+      setGlobalError(e.response?.data?.error || e.message || "Error reverting");
     }
   };
 
   const handleMatchTmdb = async (movieId: number) => {
+    if (!isTmdbConfigured) {
+      setGlobalError("TMDB API Key missing. Please configure it in Settings.");
+      setShowSettings(true);
+      return;
+    }
+    setMatchingMovies(prev => new Set(prev).add(movieId));
+    setGlobalError(null);
     try {
+      console.log(`[Frontend] Triggering TMDB match for movie ${movieId}`);
       await axios.post(`/api/movie/${movieId}/tmdb`);
       await fetchMovies();
     } catch (e: any) {
-      alert(e.response?.data?.error || "Error matching TMDB");
+      console.error(`[Frontend] TMDB match failed for movie ${movieId}`, e);
+      setGlobalError(e.response?.data?.error || "Error matching TMDB");
+    } finally {
+      setMatchingMovies(prev => {
+        const next = new Set(prev);
+        next.delete(movieId);
+        return next;
+      });
     }
   };
 
@@ -426,6 +458,7 @@ export default function App() {
       if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) return false;
       if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) return false;
       if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) return false;
+      if (fileNameFilter && !m.fileName.toLowerCase().includes(fileNameFilter.toLowerCase())) return false;
       if (statusFilter) {
         if (statusFilter === 'matched') {
            if (m.status !== 'indexed' || !m.imdbId) return false;
@@ -475,49 +508,62 @@ export default function App() {
             </div>
             <h1 className="text-xl md:text-2xl font-semibold text-slate-900 dark:text-slate-100 tracking-tight">Debrid Media Upgrader</h1>
           </div>
-          <div className="flex items-center gap-2 md:gap-4">
+          <div className="flex items-center gap-1.5 sm:gap-3">
             <button 
               onClick={() => setShowLogs(true)}
-              className="flex items-center justify-center p-2.5 sm:px-3 sm:py-2 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border border-slate-200 dark:border-slate-700/50 rounded-md font-medium transition-colors shadow-sm min-w-[44px] min-h-[44px]"
+              className="flex items-center justify-center p-2 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border border-slate-200 dark:border-slate-700/50 rounded-md font-medium transition-colors shadow-sm min-w-[40px] h-[40px]"
               title="System Logs"
             >
-              <Terminal className="w-5 h-5" />
-              <span className="hidden lg:inline ml-2">Logs</span>
+              <Terminal className="w-4 h-4 sm:w-5 sm:h-5" />
+              <span className="hidden xl:inline ml-2 text-sm">Logs</span>
             </button>
             <button 
               onClick={() => setShowSettings(true)}
-              className="flex items-center justify-center p-2.5 sm:px-3 sm:py-2 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border border-slate-200 dark:border-slate-700/50 rounded-md font-medium transition-colors shadow-sm min-w-[44px] min-h-[44px]"
-              title="Settings"
+              className={cn(
+                "flex items-center justify-center p-2 bg-white dark:bg-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 border rounded-md font-medium transition-colors shadow-sm min-w-[40px] h-[40px] relative",
+                (!isTmdbConfigured || !isAiostreamsConfigured) ? "text-amber-500 border-amber-500/50" : "text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700/50"
+              )}
+              title={(!isTmdbConfigured || !isAiostreamsConfigured) ? "Settings (Configuration Required)" : "Settings"}
             >
-              <Settings2 className="w-5 h-5" />
-              <span className="hidden sm:inline ml-2">Settings</span>
+              <Settings2 className="w-4 h-4 sm:w-5 sm:h-5" />
+              <span className="hidden xl:inline ml-2 text-sm">Settings</span>
+              {(!isTmdbConfigured || !isAiostreamsConfigured) && (
+                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                </span>
+              )}
             </button>
+            <div className="h-6 w-px bg-slate-200 dark:bg-slate-800 mx-1 hidden sm:block"></div>
             <button 
               onClick={handleScan}
               disabled={isLoading || movies.some(m => m.status === 'fetching_metadata')}
-              className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md font-medium transition-colors disabled:opacity-50 min-h-[44px] shadow-sm active:scale-95"
+              className="flex items-center justify-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md font-medium transition-colors disabled:opacity-50 h-[40px] shadow-sm active:scale-95"
+              title="Rescan Library"
             >
               <RefreshCw className={cn("w-4 h-4", (isLoading || movies.some(m => m.status === 'fetching_metadata')) && "animate-spin")} />
-              <span>{isLoading || movies.some(m => m.status === 'fetching_metadata') ? "Scanning..." : "Rescan"}</span>
+              <span className="hidden sm:inline text-sm">{isLoading || movies.some(m => m.status === 'fetching_metadata') ? "Scanning..." : "Rescan"}</span>
             </button>
             <button 
               onClick={handleUpgradeAll} 
               className={cn(
-                "hidden md:flex items-center gap-2 px-4 py-2 rounded-md font-medium transition-all shadow-sm border",
+                "flex items-center justify-center gap-2 px-3 py-2 rounded-md font-medium transition-all shadow-sm border h-[40px]",
                 isQueueActive 
                   ? "bg-amber-500 hover:bg-amber-600 text-white border-amber-600 animate-pulse" 
                   : "bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700"
               )}
+              title={isQueueActive ? "Stop Queue" : "Start Queue"}
             >
               {isQueueActive ? (
                 <>
                   <RotateCcw className="w-4 h-4 animate-spin" />
-                  Processing Queue ({movies.filter(m => m.status === 'magnet_found').length} left)
+                  <span className="hidden sm:inline text-sm">Queue ({movies.filter(m => m.status === 'magnet_found').length})</span>
+                  <span className="sm:hidden text-xs font-bold">{movies.filter(m => m.status === 'magnet_found').length}</span>
                 </>
               ) : (
                 <>
                   <Download className="w-4 h-4" />
-                  Upgrade All Ready
+                  <span className="hidden sm:inline text-sm">Upgrade All</span>
                 </>
               )}
             </button>
@@ -525,68 +571,100 @@ export default function App() {
         </div>
         
         {/* Filters */}
-        <div className="mt-6 flex flex-col md:flex-row md:items-center gap-4 bg-white dark:bg-slate-900/50 p-4 rounded-lg border border-slate-200 dark:border-slate-800/80 shadow-sm">
-          <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-            <Filter className="w-4 h-4" />
-            <span className="text-sm font-medium">Filters:</span>
-          </div>
-          
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:items-center gap-4 flex-1">
-            <select 
-              className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-300 min-h-[44px]"
-              value={maxResFilter}
-              onChange={(e) => setMaxResFilter(e.target.value)}
-            >
-              <option value="">Res: All</option>
-              <option value="720x480">480p</option>
-              <option value="1280x720">720p</option>
-              <option value="1920x1080">1080p</option>
-              <option value="3840x2160">4K</option>
-              <option value="7680x4320">8K</option>
-            </select>
+        <div className="mt-4 sm:mt-6 bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800/80 rounded-xl shadow-sm overflow-hidden transition-all duration-300">
+          <div className="p-1 sm:p-2 flex flex-col lg:flex-row lg:items-center gap-1 sm:gap-2">
             
-            <div className="flex flex-col gap-1 sm:col-span-2 lg:col-auto lg:flex-1 lg:max-w-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Max Bitrate</span>
-                <span className="text-xs font-mono text-indigo-500">{maxBitrateFilter ? `${(Number(maxBitrateFilter) / 1000000).toFixed(1)} Mbps` : 'Unlimited'}</span>
-              </div>
-              <input 
-                type="range" 
-                min="0"
-                max="50000000"
-                step="1000000"
-                className="w-full accent-indigo-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer"
-                value={maxBitrateFilter || 0}
-                onChange={(e) => setMaxBitrateFilter(e.target.value === '0' ? '' : e.target.value)}
-              />
+            <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0">
+              <Filter className="w-4 h-4 text-indigo-500" />
+              <span className="text-xs font-bold uppercase tracking-tight text-slate-400 dark:text-slate-500">Filter Library</span>
             </div>
+            
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:flex lg:items-center gap-1 sm:gap-2 flex-1 p-1">
+              <div className="relative col-span-2 md:col-span-1 lg:flex-1 lg:min-w-[180px]">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                <input 
+                  type="text"
+                  placeholder="Search file name..."
+                  value={fileNameFilter}
+                  onChange={(e) => setFileNameFilter(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all hover:border-slate-300 dark:hover:border-slate-700"
+                />
+              </div>
 
-            <select 
-              className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-300 min-h-[44px]"
-              value={extFilter}
-              onChange={(e) => setExtFilter(e.target.value)}
-            >
-              <option value="">Ext: All</option>
-              <option value=".mp4">.mp4</option>
-              <option value=".mkv">.mkv</option>
-              <option value=".avi">.avi</option>
-              <option value=".webm">.webm</option>
-            </select>
+              <select 
+                className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all cursor-pointer hover:border-slate-300 dark:hover:border-slate-700"
+                value={maxResFilter}
+                onChange={(e) => setMaxResFilter(e.target.value)}
+              >
+                <option value="">Res: All</option>
+                <option value="720x480">480p</option>
+                <option value="1280x720">720p</option>
+                <option value="1920x1080">1080p</option>
+                <option value="3840x2160">4K</option>
+                <option value="7680x4320">8K</option>
+              </select>
+              
+              <select 
+                className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all cursor-pointer hover:border-slate-300 dark:hover:border-slate-700"
+                value={extFilter}
+                onChange={(e) => setExtFilter(e.target.value)}
+              >
+                <option value="">Ext: All</option>
+                <option value=".mp4">.mp4</option>
+                <option value=".mkv">.mkv</option>
+                <option value=".avi">.avi</option>
+                <option value=".webm">.webm</option>
+              </select>
 
-    <select 
-      className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-300 min-h-[44px]"
-      value={statusFilter}
-      onChange={(e) => setStatusFilter(e.target.value)}
-    >
-      <option value="">Status: All</option>
-      <option value="fetching_metadata">Fetching Metadata</option>
-      <option value="indexed">Indexed (Unmatched)</option>
-      <option value="matched">Matched</option>
-      <option value="magnet_found">Ready to Upgrade</option>
-      <option value="upgrading">Upgrading</option>
-      <option value="paused">Paused</option>
-      <option value="verifying_upgrade">Verifying Upgrade</option>
-    </select>
+              <select 
+                className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all cursor-pointer hover:border-slate-300 dark:hover:border-slate-700 col-span-2 md:col-span-1"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                <option value="">Status: All</option>
+                <option value="fetching_metadata">Fetching Metadata</option>
+                <option value="indexed">Indexed (Unmatched)</option>
+                <option value="matched">Matched</option>
+                <option value="magnet_found">Ready to Upgrade</option>
+                <option value="upgrading">Upgrading</option>
+                <option value="paused">Paused</option>
+                <option value="verifying_upgrade">Verifying Upgrade</option>
+              </select>
+              
+              <div className="flex flex-col gap-1 px-4 py-2 bg-slate-50/50 dark:bg-slate-950/30 rounded-lg border border-slate-200/50 dark:border-slate-800/50 col-span-2 md:col-span-3 lg:col-auto lg:flex-1 lg:min-w-[200px]">
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-[10px] uppercase font-black text-slate-400 dark:text-slate-600 tracking-wider">Bitrate Filter</span>
+                  <span className="text-xs font-mono font-bold text-indigo-500 bg-indigo-500/10 px-1.5 py-0.5 rounded">
+                    {maxBitrateFilter ? `${(Number(maxBitrateFilter) / 1000000).toFixed(1)} Mbps` : 'Unlimited'}
+                  </span>
+                </div>
+                <input 
+                  type="range" 
+                  min="0"
+                  max="50000000"
+                  step="1000000"
+                  className="w-full accent-indigo-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                  value={maxBitrateFilter || 0}
+                  onChange={(e) => setMaxBitrateFilter(e.target.value === '0' ? '' : e.target.value)}
+                />
+              </div>
+              
+              {(maxResFilter || extFilter || statusFilter || maxBitrateFilter || fileNameFilter) && (
+                <button 
+                  onClick={() => {
+                    setMaxResFilter('');
+                    setExtFilter('');
+                    setStatusFilter('');
+                    setMaxBitrateFilter('');
+                    setFileNameFilter('');
+                  }}
+                  className="text-xs font-semibold text-slate-400 hover:text-indigo-500 px-3 py-2 flex items-center gap-1.5 transition-colors col-span-2 md:col-span-3 lg:col-auto"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Clear Filters
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -639,12 +717,26 @@ export default function App() {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
               {filteredMovies.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-slate-400 dark:text-slate-500">
-                    No movies found. Click "Rescan Library" to index.
+                  <td colSpan={10} className="px-6 py-20 text-center">
+                    <div className="flex flex-col items-center justify-center space-y-3">
+                      <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-full border-2 border-dashed border-slate-200 dark:border-slate-800">
+                        <HardDrive className="w-10 h-10 text-slate-300 dark:text-slate-700" />
+                      </div>
+                      <div>
+                        <p className="text-slate-600 dark:text-slate-300 font-bold text-lg">Your library is currently empty</p>
+                        <p className="text-sm text-slate-400 dark:text-slate-500">Run a scan or generate mock files in Settings to get started.</p>
+                      </div>
+                      <button 
+                        onClick={handleScan}
+                        className="mt-4 px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-sm font-black shadow-lg shadow-indigo-500/20 active:scale-95 transition-all"
+                      >
+                        Rescan Library
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ) : filteredMovies.map(movie => (
-                <tr key={movie.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/20 transition-colors">
+                <tr key={movie.id} className="group hover:bg-slate-50/80 dark:hover:bg-indigo-500/5 transition-all duration-150 border-b border-transparent hover:border-indigo-500/20">
                   <td className="px-4 py-3 text-slate-500 dark:text-slate-300 font-mono text-xs max-w-[200px] truncate" title={movie.fileName}>{movie.fileName}</td>
                   <td className="px-4 py-3 font-medium text-slate-800 dark:text-slate-200">{movie.movieName}</td>
                   <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
@@ -682,9 +774,21 @@ export default function App() {
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
                       {movie.imdbId ? (
-                         <ActionBtn icon={<Search className="w-4 h-4" />} title="Search upgrades" onClick={() => handleSearch(movie.id)} />
+                         <ActionBtn 
+                           icon={<Search className={cn("w-4 h-4", !isAiostreamsConfigured && "text-slate-300 dark:text-slate-600")} />} 
+                           title={!isAiostreamsConfigured ? "AIOStreams URL Required" : "Search upgrades"} 
+                           onClick={() => handleSearch(movie.id)} 
+                           active={isAiostreamsConfigured}
+                           disabled={!isAiostreamsConfigured}
+                         />
                       ) : (
-                         <ActionBtn icon={<Fingerprint className="w-4 h-4" />} title="Match TMDB" onClick={() => handleMatchTmdb(movie.id)} active />
+                         <ActionBtn 
+                          icon={matchingMovies.has(movie.id) ? <RefreshCw className="w-4 h-4 animate-spin text-indigo-500" /> : <Fingerprint className={cn("w-4 h-4", !isTmdbConfigured && "text-slate-300 dark:text-slate-600")} />} 
+                          title={!isTmdbConfigured ? "TMDB Key Required" : "Match TMDB"} 
+                          onClick={() => handleMatchTmdb(movie.id)} 
+                          active={isTmdbConfigured}
+                          disabled={!isTmdbConfigured}
+                        />
                       )}
                       
                       {movie.status === 'magnet_found' && (
@@ -714,45 +818,57 @@ export default function App() {
         {/* Mobile Card View */}
         <div className="md:hidden grid grid-cols-1 gap-4">
           {filteredMovies.length === 0 ? (
-            <div className="px-4 py-12 text-center text-slate-400 bg-white dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm">
-              No movies found.
+            <div className="flex flex-col items-center justify-center py-20 px-4 text-center bg-white dark:bg-slate-900/40 rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 shadow-inner">
+              <div className="w-16 h-16 bg-indigo-50 dark:bg-indigo-900/20 rounded-full flex items-center justify-center mb-4 text-indigo-500">
+                <Search className="w-8 h-8 opacity-40" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 mb-1">No movies found</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xs mx-auto">
+                Try scanning your library or adjusting your filters to see more results.
+              </p>
+              <button 
+                onClick={handleScan}
+                className="mt-6 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full text-sm font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all"
+              >
+                Scan Library Now
+              </button>
             </div>
           ) : filteredMovies.map(movie => (
-            <div key={movie.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-4 shadow-sm active:bg-slate-50 dark:active:bg-slate-800 transition-colors">
-              <div className="flex justify-between items-start mb-3">
-                <div className="flex-1 min-w-0 pr-2">
-                  <h3 className="font-semibold text-slate-900 dark:text-slate-100 truncate">{movie.movieName}</h3>
-                  <p className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5 truncate">{movie.fileName}</p>
+            <div key={movie.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/80 rounded-2xl p-5 shadow-sm active:bg-slate-50 dark:active:bg-slate-800 transition-all duration-200 hover:shadow-md border-b-4 border-b-slate-100 dark:border-b-slate-800/50">
+              <div className="flex justify-between items-start mb-4 gap-3">
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-bold text-slate-900 dark:text-slate-100 leading-tight line-clamp-2 text-base">{movie.movieName}</h3>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <span className="text-[10px] font-black text-white bg-slate-400 dark:bg-slate-700 px-1.5 py-0.5 rounded-md uppercase tracking-wider">{movie.year || 'N/A'}</span>
+                    <p className="text-[10px] font-mono text-slate-400 dark:text-slate-500 truncate flex-1">{movie.fileName}</p>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  {movie.hdr && <span className="px-1.5 py-0.5 rounded text-[8px] uppercase font-bold bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20 shadow-sm">HDR</span>}
-                  <span className="text-xs font-medium text-slate-500">{movie.year || '-'}</span>
+                <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                  {movie.hdr && <span className="px-2 py-0.5 rounded-md text-[9px] font-black bg-amber-500 text-white shadow-sm shadow-amber-500/20">HDR</span>}
+                  <span className="text-[10px] font-black text-indigo-500 bg-indigo-500/10 px-2 py-1 rounded-md border border-indigo-500/20 uppercase tracking-tighter">{movie.resolution}</span>
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-x-4 gap-y-2 mb-4 text-xs">
-                <div className="flex flex-col">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Resolution</span>
-                  <span className="text-slate-700 dark:text-slate-300 font-medium">{movie.resolution}</span>
+              <div className="grid grid-cols-2 gap-2 mb-5 p-3 bg-slate-50 dark:bg-slate-950/40 rounded-xl border border-slate-100 dark:border-slate-800/50">
+                <div className="flex flex-col items-center justify-center py-1">
+                  <span className="text-[9px] uppercase font-black text-slate-400 tracking-widest mb-1">File Size</span>
+                  <span className="text-sm text-slate-700 dark:text-slate-200 font-black tracking-tight">{formatBytes(movie.fileSize)}</span>
                 </div>
-                <div className="flex flex-col">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Size</span>
-                  <span className="text-slate-700 dark:text-slate-300 font-medium">{formatBytes(movie.fileSize)}</span>
-                </div>
-                <div className="flex flex-col">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-0.5">Bitrate</span>
-                  <span className="text-slate-700 dark:text-slate-300 font-medium">
-                    {movie.bitrate > 0 ? `${(movie.bitrate / 1000).toFixed(0)} kbps` : 'N/A'}
+                <div className="h-full w-px bg-slate-200 dark:bg-slate-800 mx-auto"></div>
+                <div className="flex flex-col items-center justify-center py-1">
+                  <span className="text-[9px] uppercase font-black text-slate-400 tracking-widest mb-1">Bitrate</span>
+                  <span className="text-sm text-slate-700 dark:text-slate-200 font-black tracking-tight">
+                    {movie.bitrate > 0 ? `${(movie.bitrate / 1000000).toFixed(1)} Mbps` : 'N/A'}
                   </span>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between pt-4 border-t border-slate-100 dark:border-slate-800 gap-y-3">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <StatusBadge movie={movie} onCancel={() => cancelUpgrade(movie.id)} onPause={() => pauseUpgrade(movie.id)} onResume={() => resumeUpgrade(movie.id)} />
-                  {movie.imdbId && (
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between">
+                   <StatusBadge movie={movie} onCancel={() => cancelUpgrade(movie.id)} onPause={() => pauseUpgrade(movie.id)} onResume={() => resumeUpgrade(movie.id)} />
+                   {movie.imdbId && (
                     <button 
-                      className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-[10px] rounded text-slate-500 border border-slate-200 dark:border-slate-700/50 shadow-sm whitespace-nowrap active:bg-red-50 dark:active:bg-red-900/30 font-medium"
+                      className="px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800/50 text-[10px] rounded-lg text-slate-400 border border-slate-200 dark:border-slate-700 shadow-sm whitespace-nowrap active:bg-red-50 dark:active:bg-red-900/30 font-black transition-colors uppercase tracking-wider"
                       title="Click to unmatch"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -764,22 +880,55 @@ export default function App() {
                   )}
                 </div>
                 
-                <div className="flex items-center gap-1.5 ml-auto">
-                  {movie.imdbId ? (
-                     <ActionBtn icon={<Search className="w-5 h-5" />} title="Search Upgrades" onClick={() => handleSearch(movie.id)} />
-                  ) : (
-                     <ActionBtn icon={<Fingerprint className="w-5 h-5" />} title="Match TMDB" onClick={() => handleMatchTmdb(movie.id)} active />
-                  )}
+                <div className="flex items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-800/50">
+                  <div className="flex-1 flex gap-2">
+                    {movie.imdbId ? (
+                      <button 
+                        onClick={() => handleSearch(movie.id)} 
+                        className={cn(
+                          "flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black shadow-lg transition-all uppercase tracking-wider",
+                          isAiostreamsConfigured ? "bg-indigo-600 active:bg-indigo-700 text-white shadow-indigo-500/20" : "bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed"
+                        )}
+                      >
+                        <Search className="w-4 h-4" />
+                        {isAiostreamsConfigured ? 'Search' : 'Setup Required'}
+                      </button>
+                    ) : (
+                      <button 
+                        onClick={() => handleMatchTmdb(movie.id)} 
+                        disabled={matchingMovies.has(movie.id)}
+                        className={cn(
+                          "flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black shadow-lg transition-all uppercase tracking-wider",
+                          isTmdbConfigured ? "bg-emerald-600 active:bg-emerald-700 text-white shadow-emerald-500/20" : "bg-slate-200 dark:bg-slate-800 text-slate-400"
+                        )}
+                      >
+                        {matchingMovies.has(movie.id) ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Fingerprint className="w-4 h-4" />}
+                        {matchingMovies.has(movie.id) ? 'Matching...' : isTmdbConfigured ? 'Match' : 'Setup Required'}
+                      </button>
+                    )}
+
+                    {movie.status === 'magnet_found' && (
+                      <button onClick={() => handleUpgrade(movie.id)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 active:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-500/20 transition-all uppercase tracking-wider animate-pulse">
+                        <Download className="w-4 h-4" />
+                        Upgrade
+                      </button>
+                    )}
+
+                    {movie.status === 'verifying_upgrade' && (
+                      <button onClick={() => handleAcceptUpgrade(movie.id)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 active:bg-emerald-700 text-white rounded-xl text-xs font-black shadow-lg shadow-emerald-500/20 transition-all uppercase tracking-wider">
+                        <Check className="w-4 h-4" />
+                        Accept
+                      </button>
+                    )}
+                  </div>
                   
-                  {movie.status === 'magnet_found' && (
-                    <ActionBtn icon={<Download className="w-5 h-5" />} title="Execute Upgrade" onClick={() => handleUpgrade(movie.id)} active />
-                  )}
-                  
-                  {movie.status === 'verifying_upgrade' && (
-                    <ActionBtn icon={<Check className="w-5 h-5" />} title="Accept Upgrade" onClick={() => handleAcceptUpgrade(movie.id)} active />
-                  )}
-                  
-                  <ActionBtn icon={<Trash2 className="w-5 h-5" />} title="Delete File" onClick={() => handleDelete(movie)} danger />
+                  <button 
+                    onClick={() => handleDelete(movie)} 
+                    className="p-2.5 bg-red-50 dark:bg-red-950/20 text-red-500 dark:text-red-400 rounded-xl border border-red-100 dark:border-red-900/30 active:bg-red-100 transition-colors shadow-sm"
+                    title="Delete File"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
                 </div>
               </div>
             </div>
@@ -880,24 +1029,36 @@ export default function App() {
             
             <div className="space-y-4 mb-6">
               <div>
-                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">TMDB API Key</label>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2 flex justify-between items-center">
+                  <span>TMDB API Key</span>
+                  {!isTmdbConfigured && <span className="text-[10px] text-red-500 font-bold uppercase tracking-wider flex items-center gap-1"><AlertCircle className="w-3 h-3"/> Required</span>}
+                </label>
                 <input 
                   type="text" 
                   value={settingsForm.tmdbApiKey}
                   onChange={e => setSettingsForm({...settingsForm, tmdbApiKey: e.target.value})}
                   placeholder="Enter TMDB API Key or Bearer Token"
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 shadow-sm"
+                  className={cn(
+                    "w-full bg-slate-50 dark:bg-slate-950 border rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 shadow-sm transition-colors",
+                    !isTmdbConfigured ? "border-red-500/50 hover:border-red-500" : "border-slate-200 dark:border-slate-800"
+                  )}
                 />
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">AIOStreams URL</label>
+                <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-2 flex justify-between items-center">
+                  <span>AIOStreams URL</span>
+                  {!isAiostreamsConfigured && <span className="text-[10px] text-red-500 font-bold uppercase tracking-wider flex items-center gap-1"><AlertCircle className="w-3 h-3"/> Required</span>}
+                </label>
                 <input 
                   type="text" 
                   value={settingsForm.aiostreamsUrl}
                   onChange={e => setSettingsForm({...settingsForm, aiostreamsUrl: e.target.value})}
                   placeholder="https://aiostreams.domain/YOUR_CONFIG_STRING"
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 shadow-sm"
+                  className={cn(
+                    "w-full bg-slate-50 dark:bg-slate-950 border rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 shadow-sm transition-colors",
+                    !isAiostreamsConfigured ? "border-red-500/50 hover:border-red-500" : "border-slate-200 dark:border-slate-800"
+                  )}
                 />
                 <p className="text-xs text-slate-500 dark:text-slate-500 mt-1">
                   Generate this on your AIOStreams setup page. Paste the URL but omit <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded text-slate-500 dark:text-slate-400">/manifest.json</code> at the end.
@@ -1185,64 +1346,63 @@ export default function App() {
 function StatusBadge({ movie, onCancel, onPause, onResume }: { movie: Movie, onCancel?: () => void, onPause?: () => void, onResume?: () => void }) {
   switch (movie.status) {
     case 'fetching_metadata':
-      return <span className="text-xs px-2 py-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500 border border-yellow-500/20 flex w-max items-center gap-1"><RefreshCw className="w-3 h-3 animate-spin"/> Fetching Info</span>;
+      return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20 flex w-max items-center gap-1.5 font-bold uppercase tracking-tight"><RefreshCw className="w-3 h-3 animate-spin"/> Fetching</span>;
     case 'indexed':
       if (movie.imdbId) {
-        return <span className="text-xs px-2 py-1 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 uppercase tracking-wider font-semibold text-[10px]">Matched</span>;
+        return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 uppercase tracking-wider font-bold">Matched</span>;
       }
-      return <span className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-semibold text-[10px]">Indexed</span>;
+      return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-bold">Indexed</span>;
     case 'magnet_found':
-      return <span className="text-xs px-2 py-1 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">Ready to Upgrade</span>;
+      return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-bold uppercase tracking-tight">Ready</span>;
     case 'upgrading':
     case 'paused':
       const isPaused = movie.status === 'paused';
       return (
-        <div className="flex flex-col gap-1.5 w-32">
-          <span className="text-[10px] font-bold uppercase tracking-wider flex justify-between items-center text-indigo-600 dark:text-indigo-400">
-            <span>{isPaused ? 'Paused' : 'Upgrading'}</span>
-            <div className="flex items-center gap-1.5">
-              <span>{movie.progress || 0}%</span>
-              
-              {!isPaused && (
+        <div className="flex flex-col gap-1.5 min-w-[120px]">
+          <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest">
+            <span className={cn(isPaused ? "text-slate-500" : "text-indigo-600 dark:text-indigo-400 animate-pulse")}>
+              {isPaused ? 'Paused' : 'Upgrading'}
+            </span>
+            <span className="text-slate-400">{movie.progress || 0}%</span>
+          </div>
+          <div className="flex items-center gap-2 group/status">
+            <div className="flex-1 bg-slate-200 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden shadow-inner">
+              <div 
+                className={cn("h-full transition-all duration-500 ease-out shadow-sm", isPaused ? "bg-slate-400 dark:bg-slate-500" : "bg-indigo-500 animate-pulse")}
+                style={{ width: `${movie.progress || 0}%` }}
+              />
+            </div>
+            <div className="flex items-center gap-1 px-1">
+              {!isPaused ? (
                 <button 
                   onClick={(e) => { e.stopPropagation(); onPause?.(); }}
-                  className="hover:text-amber-500 transition-colors cursor-pointer"
+                  className="p-1 hover:bg-amber-500/10 hover:text-amber-500 text-slate-400 transition-all rounded-md"
                   title="Pause Upgrade"
                 >
                   <Pause className="w-3 h-3" />
                 </button>
-              )}
-              {isPaused && (
+              ) : (
                 <button 
                   onClick={(e) => { e.stopPropagation(); onResume?.(); }}
-                  className="hover:text-emerald-500 transition-colors cursor-pointer"
+                  className="p-1 hover:bg-emerald-500/10 hover:text-emerald-500 text-slate-400 transition-all rounded-md"
                   title="Resume Upgrade"
                 >
                   <Play className="w-3 h-3 fill-current" />
                 </button>
               )}
               <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCancel?.();
-                }}
-                className="hover:text-red-500 transition-colors cursor-pointer"
+                onClick={(e) => { e.stopPropagation(); onCancel?.(); }}
+                className="p-1 hover:bg-red-500/10 hover:text-red-500 text-slate-400 transition-all rounded-md"
                 title="Cancel Upgrade"
               >
                 <Ban className="w-3 h-3" />
               </button>
             </div>
-          </span>
-          <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-1 overflow-hidden shadow-inner">
-            <div 
-              className={cn("h-full transition-all duration-500 ease-out shadow-sm", isPaused ? "bg-slate-400 dark:bg-slate-500" : "bg-indigo-500")}
-              style={{ width: `${movie.progress || 0}%` }}
-            />
           </div>
         </div>
       );
     case 'verifying_upgrade':
-      return <span className="text-xs px-2 py-1 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 flex w-max items-center gap-1 uppercase font-bold text-[10px]">Verifying</span>;
+      return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 flex w-max items-center gap-1.5 uppercase font-bold tracking-widest animate-pulse">Verifying</span>;
     default:
       return <span className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-semibold text-[10px]">{movie.status}</span>;
   }
@@ -1268,13 +1428,15 @@ function SortHeader({ label, sortKey, currentSort, onSort }: { label: string, so
   );
 }
 
-function ActionBtn({ icon, onClick, title, danger, active }: { icon: React.ReactNode, onClick: () => void, title: string, danger?: boolean, active?: boolean }) {
+function ActionBtn({ icon, onClick, title, danger, active, disabled }: { icon: React.ReactNode, onClick: () => void, title: string, danger?: boolean, active?: boolean, disabled?: boolean }) {
   return (
     <button
       title={title}
       onClick={onClick}
+      disabled={disabled}
       className={cn(
         "p-1.5 rounded transition-all transform active:scale-95",
+        disabled ? "opacity-30 cursor-not-allowed grayscale" :
         danger ? "text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10" : 
         active ? "text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 hover:bg-indigo-100 dark:hover:bg-indigo-500/20" :
         "text-slate-400 dark:text-slate-500 hover:text-slate-900 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"

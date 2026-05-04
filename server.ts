@@ -644,16 +644,19 @@ function getReleaseNameFromUrl(link: string): string {
 
 async function fetchImdbId(movieName: string, year: string): Promise<{ imdbId: string; tmdbTitle: string; year?: string } | null> {
   if (!settingsCache.tmdbApiKey) {
-    throw new Error("TMDB_API_KEY is not configured in settings. Please add it first.");
+    console.error("[TMDB] TMDB_API_KEY is missing from settings");
+    throw new Error("TMDB_API_KEY is not configured in settings. Please add your API Key in Settings.");
   }
 
   try {
     let searchUrl = `https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(movieName)}`;
-    if (year) {
+    if (year && year !== "Unknown") {
       searchUrl += `&year=${year}`;
     }
     
+    console.log(`[TMDB] Searching for "${movieName}" ${year ? `(${year})` : ''}...`);
     let searchData = await tmdbFetch(searchUrl);
+    
     if (searchData.results && searchData.results.length > 0) {
       const topResult = searchData.results[0];
       const tmdbId = topResult.id;
@@ -661,15 +664,22 @@ async function fetchImdbId(movieName: string, year: string): Promise<{ imdbId: s
       const releaseDate = topResult.release_date;
       const tmdbYear = releaseDate ? releaseDate.split("-")[0] : undefined;
       
+      console.log(`[TMDB] Found result: "${tmdbTitle}" (${tmdbYear}) - ID: ${tmdbId}. Fetching external IDs...`);
+      
       let extUrl = `https://api.themoviedb.org/3/movie/${tmdbId}/external_ids`;
       let extData = await tmdbFetch(extUrl);
       
       if (extData.imdb_id) {
         return { imdbId: extData.imdb_id, tmdbTitle, year: tmdbYear };
+      } else {
+        console.warn(`[TMDB] No IMDB ID associated with TMDB ID ${tmdbId} ("${tmdbTitle}")`);
       }
+    } else {
+       console.warn(`[TMDB] No search results for "${movieName}"`);
     }
-  } catch (error) {
-    console.error(`Error fetching IMDB ID for ${movieName}:`, error);
+  } catch (error: any) {
+    console.error(`[TMDB] Error fetching IMDB ID for ${movieName}:`, error.message || error);
+    throw error; // Re-throw to be caught by the API handler
   }
   return null;
 }
@@ -737,6 +747,11 @@ function containsAiostreamsError(data: any): string | null {
 
 async function aiostreamsSearch(imdbId: string, forceRefresh = false) {
   const baseUrl = settingsCache.aiostreamsUrl;
+  
+  if (!baseUrl) {
+    throw new Error("AIOStreams URL is not configured. Please add your AIOStreams Manifest URL in Settings.");
+  }
+
   console.log(`[Search] Function entry. Using AIOStreams Base URL: ${baseUrl}`);
 
   const cached = aiostreamsCache[imdbId];
@@ -1140,13 +1155,19 @@ async function startServer() {
     const movie = db.find(m => m.id === movieId);
     if (!movie) return res.status(404).json({ error: "Movie not found" });
 
+    console.log(`[API] Manual TMDB match requested for "${movie.movieName}" (ID: ${movieId})`);
+
     try {
+      if (!movie.movieName) {
+        return res.status(400).json({ error: "Movie name is empty, cannot search TMDB" });
+      }
+
       const result = await fetchImdbId(movie.movieName, movie.year);
       if (result) {
         movie.imdbId = result.imdbId;
         movie.tmdbTitle = result.tmdbTitle;
         console.log(`[TMDB] Successfully matched "${movie.movieName}" to IMDB: ${result.imdbId} (${result.tmdbTitle})`);
-        // Update year if not already set or if it's "Unknown" (if that's a thing in the app)
+        
         if (result.year && (!movie.year || movie.year === "")) {
           movie.year = result.year;
         }
@@ -1154,10 +1175,11 @@ async function startServer() {
         res.json({ success: true, imdbId: result.imdbId, tmdbTitle: result.tmdbTitle, year: movie.year });
       } else {
         console.warn(`[TMDB] No match found for "${movie.movieName}" (${movie.year || 'No Year'})`);
-        res.status(404).json({ error: "No IMDB ID found on TMDB" });
+        res.status(404).json({ error: `No match found on TMDB for "${movie.movieName}"` });
       }
-    } catch (err) {
-      res.status(500).json({ error: String(err) });
+    } catch (err: any) {
+      console.error(`[API] TMDB Match Error for "${movie.movieName}":`, err.message || err, err.stack);
+      res.status(500).json({ error: err.message || String(err) });
     }
   });
 
