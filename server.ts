@@ -1663,16 +1663,33 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
-  const forceShutdown = () => {
-    console.log("\n[Server] Exiting application...");
-    process.exit(0);
+  const gracefulShutdown = async () => {
+    console.log("\n[Server] Shutdown signal received. Cleaning up...");
+    
+    // Stop reading input and release terminal
+    process.stdin.pause();
+    process.stdin.unref();
+
+    if (viteServer) {
+      try { await viteServer.close(); } catch (e) {}
+    }
+    
+    server.close(() => {
+      console.log("[Server] HTTP server stopped.");
+    });
+
+    // We must kill process group or exit cleanly. Let's just exit Node after cleanup.
+    setTimeout(() => {
+      console.log("[Server] Exited.");
+      process.exit(0);
+    }, 100);
   };
 
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
 
-  process.on('SIGINT', forceShutdown);
-  process.on('SIGTERM', forceShutdown);
+  process.on('SIGINT', () => { gracefulShutdown(); });
+  process.on('SIGTERM', () => { gracefulShutdown(); });
   process.on('uncaughtException', (err: Error) => {
     console.error(`[Server] UNCAUGHT EXCEPTION: ${err.message}`, err.stack);
     process.exit(1);
@@ -1685,7 +1702,7 @@ async function startServer() {
     process.stdin.on('data', (data) => {
       const input = data.toString().trim().toLowerCase();
       if (input === 'q' || input === 'exit' || input === 'stop' || input === 'quit') {
-        forceShutdown();
+        gracefulShutdown();
       }
     });
     

@@ -68,6 +68,6 @@ echo Starting application...
 echo.
 
 :: 5. Run the app
-call npm run dev
+call npx tsx server.ts
 
-pause
+if %errorlevel% neq 0 pause
