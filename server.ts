@@ -115,6 +115,7 @@ function sanitizeFileName(name: string): string {
     .replace(/[\u{1F300}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E0}-\u{1F1FF}]/gu, '') // Remove emojis and symbols
     .replace(/[<>:"/\\|?*]/g, '_') // Replace illegal chars with underscore
     .replace(/\s+/g, ' ') // Preserve spaces (collapse multiple to one)
+    .replace(/\.{2,}/g, '.') // Collapse multiple dots into one
     .trim();
 }
 
@@ -232,7 +233,12 @@ function deleteCompanionSubtitles(videoPath: string) {
 // Helper to generate a clean staging file name
 function getStagingFileName(movie: Movie): string {
   let tempFileName = "";
-  if (movie.magnetLink) {
+  
+  if (movie.upgradeMeta?.filename) {
+    tempFileName = `${sanitizeFileName(movie.upgradeMeta.filename)}.tmp`;
+  }
+
+  if (!tempFileName && movie.magnetLink) {
     try {
       const u = new URL(movie.magnetLink);
       let pathname = decodeURIComponent(u.pathname);
@@ -246,9 +252,7 @@ function getStagingFileName(movie: Movie): string {
       }
     } catch (e) {}
   }
-  if (!tempFileName && movie.upgradeMeta?.filename) {
-    tempFileName = `${sanitizeFileName(movie.upgradeMeta.filename)}.tmp`;
-  }
+  
   if (!tempFileName) {
     tempFileName = `download_staging_${movie.id}.tmp`;
   }
@@ -632,11 +636,14 @@ async function unrollAiostreamsLink(link: string): Promise<string | null> {
 function getReleaseNameFromUrl(link: string): string {
     try {
         const url = new URL(link);
-        const segments = url.pathname.split('/');
+        const segments = url.pathname.split('/').filter(Boolean);
         let filename = segments.pop() || "";
         if (!filename && segments.length > 0) filename = segments.pop() || "";
         // Decode and strip query/hash
         filename = decodeURIComponent(filename).split('?')[0].split('#')[0];
+        
+        // If it looks like a hash or UUID (long hex/alphanumeric), it might not be a filename
+        // But AIOStreams usually puts the filename at the very end of the path
         return filename;
     } catch (e) {
         return "";
@@ -1326,7 +1333,22 @@ async function startServer() {
 
     // Unroll ephemeral proxy URLs immediately before they expire
     try {
-        const isProxyLink = link.includes('/api/v1/debrid/playback') || link.includes('/stream/');
+        const originalLink = link;
+        const isProxyLink = link.includes('/api/v1/debrid/playback') || link.includes('/stream/') || link.includes('aiostreams');
+        
+        // Ensure meta has a filename if possible from the original URL before unrolling
+        if (!meta) meta = {};
+        if (!meta.filename) {
+            const guessedName = getReleaseNameFromUrl(originalLink);
+            // AIOStreams URLs usually have the filename as the last segment
+            // We ignore generic segments like 'playback' or 'stream'
+            const ignored = ['playback', 'stream', 'api', 'v1', 'debrid', 'stremio', 'manifest', 'json'];
+            if (guessedName && !ignored.includes(guessedName.toLowerCase())) {
+                console.log(`[Proxy Link] Guessed filename from original URL: ${guessedName}`);
+                meta.filename = guessedName;
+            }
+        }
+
         if (isProxyLink) {
             console.log(`[Proxy Link] Processing ephemeral URL: ${link}`);
             let dest = await unrollAiostreamsLink(link);
