@@ -34,7 +34,7 @@ if %errorLevel% equ 0 (
 echo.
 
 :: 2. Verify Node/NPM Installation
-where npm >nul 2>nul
+call npm -v >nul 2>&1
 if %errorLevel% neq 0 (
     echo [ERROR] Node.js/NPM is not installed or not in your PATH.
     echo Please run INSTALL_DEPENDENCIES.bat and RESTART your CMD window.
@@ -68,6 +68,6 @@ echo Starting application...
 echo.
 
 :: 5. Run the app
-call npx tsx server.ts
+call npm run dev
 
 if %errorlevel% neq 0 pause
