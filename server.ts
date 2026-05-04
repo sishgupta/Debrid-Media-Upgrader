@@ -1663,9 +1663,19 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
-  const forceShutdown = () => {
-    console.log("\n[Server] Application exiting immediately.");
-    process.exit(0);
+  const forceShutdown = async () => {
+    console.log("\n[Server] Shutting down handles and exiting...");
+    let exitTimeout = setTimeout(() => process.exit(0), 1000);
+    exitTimeout.unref();
+
+    if (viteServer) {
+      try { await viteServer.close(); } catch (e) {}
+    }
+    
+    server.close(() => {
+      console.log("[Server] Server stopped cleanly.");
+      process.exit(0);
+    });
   };
 
   process.removeAllListeners('SIGINT');
@@ -1679,8 +1689,28 @@ async function startServer() {
   });
 
   // Stdin handling often interferes with Windows terminal state (raw mode bugs, hanging prompts).
-  // Rely exclusively on OS-level termination signals (Ctrl+C).
-  console.log("[Server] Press Ctrl+C to stop the server.");
+  // Custom simple readline equivalent for 'q' to quit
+  const setupInput = () => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.resume();
+    process.stdin.on('data', (data) => {
+      const str = data.toString();
+      // Handle Ctrl+C (0x03), Ctrl+D (0x04) in raw mode
+      if (str.includes('\u0003') || str.includes('\u0004')) {
+        forceShutdown();
+        return;
+      }
+      
+      const input = str.trim().toLowerCase();
+      if (input === 'q' || input === 'quit' || input === 'exit') {
+        forceShutdown();
+      }
+    });
+    
+    console.log("[Server] Type 'q' and press Enter to stop the server.");
+  };
+
+  setupInput();
 
   // Background Queue Worker
   setInterval(async () => {
