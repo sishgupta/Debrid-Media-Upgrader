@@ -4,7 +4,6 @@ import fs from "fs";
 import path from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffprobeStatic from "ffprobe-static";
-import readline from "readline";
 
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
@@ -1664,71 +1663,33 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
-  let rl: readline.Interface | undefined;
-
-  const gracefulShutdown = async () => {
-    console.log("\n[Server] Shutdown signal received. Closing server handles...");
-    
-    // CRITICAL: Close readline first to restore terminal state (fixes "weird shell" bug)
-    if (rl) {
-      rl.close();
-    }
-    
-    // Completely detatch from standard input
-    process.stdin.unref();
-    process.stdin.pause();
-    
-    if (viteServer) {
-      try { await viteServer.close(); } catch (e) {}
-    }
-    
-    server.close(() => {
-      console.log("[Server] HTTP server stopped.");
-    });
-    
-    // Force exit with slightly longer timeout to ensure Vite and handles clear gracefully
-    setTimeout(() => {
-      console.log("[Server] Process exiting cleanly. (PID: " + process.pid + ")");
-      process.exit(0);
-    }, 300).unref();
+  const forceShutdown = () => {
+    console.log("\n[Server] Exiting application...");
+    process.exit(0);
   };
 
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
 
-  process.on('SIGINT', () => gracefulShutdown());
-  process.on('SIGTERM', () => gracefulShutdown());
+  process.on('SIGINT', forceShutdown);
+  process.on('SIGTERM', forceShutdown);
   process.on('uncaughtException', (err: Error) => {
     console.error(`[Server] UNCAUGHT EXCEPTION: ${err.message}`, err.stack);
-    if (rl) rl.close();
     process.exit(1);
   });
 
-  // Dual-mode input handling for best compatibility
+  // Simple input handling that avoids the 'readline' module which can corrupt terminal state
   const setupInput = () => {
-    rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      // Setting terminal correctly ensures raw mode is used gracefully when available
-      terminal: !!process.stdin.isTTY
-    });
-
-    rl.on('line', (line) => {
-      const input = line.trim().toLowerCase();
-      if (input === 'q' || input === 'exit' || input === 'stop') {
-        gracefulShutdown();
+    process.stdin.setEncoding('utf8');
+    process.stdin.resume();
+    process.stdin.on('data', (data) => {
+      const input = data.toString().trim().toLowerCase();
+      if (input === 'q' || input === 'exit' || input === 'stop' || input === 'quit') {
+        forceShutdown();
       }
     });
-
-    rl.on('SIGINT', () => {
-      gracefulShutdown();
-    });
-
-    if (process.stdin.isTTY) {
-      console.log("[Server] Interactive terminal detected. Type 'q' + Enter or Press Ctrl+C to stop.");
-    } else {
-      console.log("[Server] Pipe mode detected. Type 'q' + Enter to stop.");
-    }
+    
+    console.log("[Server] Type 'q' + Enter or press Ctrl+C to stop.");
   };
 
   setupInput();
