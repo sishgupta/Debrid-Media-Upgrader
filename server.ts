@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffprobeStatic from "ffprobe-static";
+import readline from "readline";
 
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
@@ -1605,13 +1606,6 @@ async function startServer() {
   const gracefulShutdown = () => {
     console.log("\n[Server] Shutdown signal received. Closing server handles...");
     
-    // Restore terminal state if was in raw mode
-    if (process.stdin.isTTY) {
-      try {
-        process.stdin.setRawMode(false);
-      } catch (e) {}
-    }
-    
     // Stop reading input to allow process to exit
     process.stdin.pause();
     
@@ -1641,38 +1635,34 @@ async function startServer() {
   });
 
   // Dual-mode input handling for best compatibility
-  if (process.stdin.isTTY) {
-    try {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (key: string) => {
-        // ctrl-c (\u0003) or 'q'
-        if (key === '\u0003' || key.toLowerCase() === 'q') {
-          gracefulShutdown();
-        }
-      });
-      console.log("[Server] Interactive terminal detected. Press Ctrl+C or 'q' to stop.");
-    } catch (e) {
-      // Fallback
-      process.stdin.on('data', (data: string) => {
-        const input = data.toString().trim().toLowerCase();
-        if (input === 'q' || input === 'exit' || input === 'stop') {
-          gracefulShutdown();
-        }
-      });
-    }
-  } else {
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (data: string) => {
-      const input = data.toString().trim().toLowerCase();
+  const setupInput = () => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: false
+    });
+
+    rl.on('line', (line) => {
+      const input = line.trim().toLowerCase();
       if (input === 'q' || input === 'exit' || input === 'stop') {
         gracefulShutdown();
       }
     });
-    console.log("[Server] Pipe mode detected. Type 'q' + Enter to stop.");
-  }
+
+    // Special handling for Ctrl+C manually if needed, 
+    // though SIGINT process listener usually handles it when not in raw mode.
+    rl.on('SIGINT', () => {
+      gracefulShutdown();
+    });
+
+    if (process.stdin.isTTY) {
+      console.log("[Server] Interactive terminal detected. Type 'q' or Press Ctrl+C to stop.");
+    } else {
+      console.log("[Server] Pipe mode detected. Type 'q' + Enter to stop.");
+    }
+  };
+
+  setupInput();
 
   // Background Queue Worker
   setInterval(async () => {

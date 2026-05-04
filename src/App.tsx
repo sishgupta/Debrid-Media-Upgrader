@@ -6,6 +6,8 @@ import { twMerge } from 'tailwind-merge';
 import * as Slider from '@radix-ui/react-slider';
 import StreamSelectorModal from './components/StreamSelectorModal';
 
+const EXPIRY_OPTIONS = [1, 3, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440];
+
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -584,7 +586,6 @@ export default function App() {
       <option value="upgrading">Upgrading</option>
       <option value="paused">Paused</option>
       <option value="verifying_upgrade">Verifying Upgrade</option>
-      <option value="upgraded">Upgraded</option>
     </select>
           </div>
         </div>
@@ -920,15 +921,15 @@ export default function App() {
                 <div className="flex items-center gap-4">
                   <input 
                     type="range" 
-                    min="1" 
-                    max="1440" 
+                    min="0" 
+                    max={EXPIRY_OPTIONS.length - 1} 
                     step="1"
-                    value={settingsForm.streamCacheExpiryMinutes}
-                    onChange={e => setSettingsForm({...settingsForm, streamCacheExpiryMinutes: parseInt(e.target.value)})}
+                    value={EXPIRY_OPTIONS.indexOf(settingsForm.streamCacheExpiryMinutes) === -1 ? 6 : EXPIRY_OPTIONS.indexOf(settingsForm.streamCacheExpiryMinutes)}
+                    onChange={e => setSettingsForm({...settingsForm, streamCacheExpiryMinutes: EXPIRY_OPTIONS[parseInt(e.target.value)]})}
                     className="flex-1 accent-indigo-500"
                   />
                   <span className="text-sm font-medium text-slate-700 dark:text-slate-200 min-w-[4rem] text-right">
-                    {settingsForm.streamCacheExpiryMinutes === 1440 
+                    {settingsForm.streamCacheExpiryMinutes >= 1440 
                       ? "1 day" 
                       : settingsForm.streamCacheExpiryMinutes >= 60 
                         ? `${Math.floor(settingsForm.streamCacheExpiryMinutes / 60)}h${settingsForm.streamCacheExpiryMinutes % 60 > 0 ? ` ${settingsForm.streamCacheExpiryMinutes % 60}m` : ""}`
@@ -1242,8 +1243,6 @@ function StatusBadge({ movie, onCancel, onPause, onResume }: { movie: Movie, onC
       );
     case 'verifying_upgrade':
       return <span className="text-xs px-2 py-1 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 flex w-max items-center gap-1 uppercase font-bold text-[10px]">Verifying</span>;
-    case 'upgraded':
-      return <span className="text-xs px-2 py-1 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-medium">Upgraded</span>;
     default:
       return <span className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-semibold text-[10px]">{movie.status}</span>;
   }
