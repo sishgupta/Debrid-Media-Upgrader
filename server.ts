@@ -1659,35 +1659,10 @@ async function startServer() {
     });
   }
 
-  const forceShutdown = () => {
-    console.log("\n[Server] Shutting down immediately...");
-    process.exit(0);
-  };
-
-  process.removeAllListeners('SIGINT');
-  process.removeAllListeners('SIGTERM');
-
-  process.on('SIGINT', forceShutdown);
-  process.on('SIGTERM', forceShutdown);
-  process.on('uncaughtException', (err: Error) => {
-    console.error(`[Server] UNCAUGHT EXCEPTION: ${err.message}`, err.stack);
-    process.exit(1);
-  });
-
-  // Simple input handling that reads non-raw raw input to avoid dropping to prompt on windows.
-  // We'll just listen to data events.
-  process.stdin.on('data', (data) => {
-    const str = data.toString().trim().toLowerCase();
-    if (str === 'q' || str === 'exit' || str === 'quit' || str === '\u0003') {
-      forceShutdown();
-    }
-  });
-
-  console.log("[Server] Type 'q' and press Enter to stop the server.");
-
   const startListening = () => {
     const server = app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server running on http://localhost:${PORT}`);
+      console.log("[Server] Press Ctrl+C to stop the server.");
     });
 
     server.on('error', (e: any) => {
@@ -1712,7 +1687,7 @@ async function startServer() {
             }
           }
         } catch (killErr) {
-          console.error(`[Server] Failed to kill zombie process. Please reboot or run 'taskkill'.`);
+          console.error(`[Server] Failed to kill zombie process. You may need to manually terminate node.exe.`);
         }
         process.exit(1);
       }
