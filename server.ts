@@ -1659,44 +1659,35 @@ async function startServer() {
     });
   }
 
-  const startListening = () => {
-    const server = app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log("[Server] Press Ctrl+C to stop the server.");
-    });
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log("[Server] Press Ctrl+C to stop the server.");
+  });
 
-    server.on('error', (e: any) => {
-      if (e.code === 'EADDRINUSE') {
-        console.error(`\n[Server] Port ${PORT} is still in use!`);
-        console.error(`[Server] Trying to forcefully kill the zombie process holding the port...`);
-        try {
-          const { execSync } = require('child_process');
-          if (process.platform === 'win32') {
-            const output = execSync(`netstat -ano | findstr :${PORT}`).toString();
-            const lines = output.split('\n').filter((l: string) => l.trim().length > 0 && l.includes('LISTENING'));
-            if (lines.length > 0) {
-              const parts = lines[0].trim().split(/\s+/);
-              const pid = parts[parts.length - 1];
-              if (pid) {
-                console.log(`[Server] Killing PID ${pid}...`);
-                execSync(`taskkill /F /PID ${pid} >nul 2>&1`);
-                console.log(`[Server] Killed. Restarting server...`);
-                setTimeout(startListening, 1000);
-                return;
-              }
-            }
-          }
-        } catch (killErr) {
-          console.error(`[Server] Failed to kill zombie process. You may need to manually terminate node.exe.`);
-        }
-        process.exit(1);
-      }
-    });
+  const forceShutdown = async () => {
+    console.log("\n[Server] Shutting down handles and exiting...");
+    let exitTimeout = setTimeout(() => process.exit(0), 1000);
+    exitTimeout.unref();
 
-    return server;
+    if (viteServer) {
+      try { await viteServer.close(); } catch (e) {}
+    }
+    
+    server.close(() => {
+      console.log("[Server] Server stopped cleanly.");
+      process.exit(0);
+    });
   };
 
-  const server = startListening();
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+
+  process.on('SIGINT', forceShutdown);
+  process.on('SIGTERM', forceShutdown);
+  process.on('uncaughtException', (err: Error) => {
+    console.error(`[Server] UNCAUGHT EXCEPTION: ${err.message}`, err.stack);
+    process.exit(1);
+  });
 
   // Background Queue Worker
   setInterval(async () => {

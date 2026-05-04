@@ -67,7 +67,15 @@ echo.
 echo Starting application...
 echo.
 
-:: 5. Run the app
+:: 5. Cleanup any previous stuck instances holding port 3000
+echo [INFO] Ensuring port 3000 is free...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') do (
+    echo [INFO] Killing zombie process PID %%a
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+:: 6. Run the app
+echo [INFO] Starting server...
 call npx tsx server.ts
 
 if %errorlevel% neq 0 pause
