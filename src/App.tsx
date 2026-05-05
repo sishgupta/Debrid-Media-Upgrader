@@ -46,15 +46,104 @@ interface Movie {
   };
 }
 
+function MultiSelectDropdown({ 
+  label, options, selected, onChange, className 
+}: { 
+  label: string, 
+  options: {value: string, label: string}[], 
+  selected: string[], 
+  onChange: (val: string[]) => void,
+  className?: string
+}) {
+  const [open, setOpen] = useState(false);
+  const dropdownRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const toggle = (val: string) => {
+    if (selected.includes(val)) onChange(selected.filter(v => v !== val));
+    else onChange([...selected, val]);
+  };
+
+  return (
+    <div className={cn("relative", className)} ref={dropdownRef}>
+      <button 
+        onClick={() => setOpen(!open)}
+        className="w-full bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all text-left flex justify-between items-center whitespace-nowrap"
+      >
+        <span className="truncate pr-2">
+          {selected.length === 0 ? label + ': All' : selected.length === 1 ? options.find(o => o.value === selected[0])?.label : `${label}: ${selected.length} selected`}
+        </span>
+        <span className="text-slate-400 text-xs">▼</span>
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 w-full min-w-[max-content] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-xl z-50 py-1 max-h-[50vh] overflow-y-auto">
+          {options.map(opt => {
+            const isSelected = selected.includes(opt.value);
+            return (
+              <button 
+                key={opt.value}
+                onClick={() => toggle(opt.value)}
+                className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/80 cursor-pointer text-left focus:outline-none focus:bg-slate-50 dark:focus:bg-slate-800/80 transition-colors group"
+              >
+                <div className={cn(
+                  "w-4 h-4 rounded border flex items-center justify-center transition-colors shrink-0", 
+                  isSelected 
+                    ? "bg-indigo-600 border-indigo-600 dark:bg-indigo-500 dark:border-indigo-500" 
+                    : "border-slate-300 dark:border-slate-600 group-hover:border-indigo-400 dark:group-hover:border-indigo-500"
+                )}>
+                  {isSelected && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                </div>
+                <span className={cn("text-sm truncate pt-0.5", isSelected ? "text-slate-900 dark:text-slate-100 font-medium" : "text-slate-700 dark:text-slate-300")}>
+                  {opt.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [movies, setMovies] = useState<Movie[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [maxResFilter, setMaxResFilter] = useState('');
   const [maxBitrateFilter, setMaxBitrateFilter] = useState('');
-  const [extFilter, setExtFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const [extFilter, setExtFilter] = useState<string[]>([]);
+  const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [fileNameFilter, setFileNameFilter] = useState('');
   const [matchingMovies, setMatchingMovies] = useState<Set<number>>(new Set());
+
+  const getFileExtension = (m: Movie) => {
+    if (m.ext) return m.ext.toLowerCase();
+    if (m.fileName) {
+      const parts = m.fileName.split('.');
+      if (parts.length > 1) return `.${parts[parts.length - 1].toLowerCase()}`;
+    }
+    return '';
+  };
+
+  const uniqueExtensions = React.useMemo(() => {
+    const nonVideo = ['.srt', '.sub', '.vtt', '.txt', '.nfo', '.db', '.jpg', '.jpeg', '.png', '.ini', '.url'];
+    const exts = new Set<string>();
+    movies.forEach(m => {
+      const ext = getFileExtension(m);
+      if (ext && !nonVideo.includes(ext)) {
+        exts.add(ext);
+      }
+    });
+    return Array.from(exts).sort().map(ext => ({ value: ext, label: ext }));
+  }, [movies]);
 
   const [sortConfig, setSortConfig] = useState<{ key: keyof Movie | null, direction: 'asc' | 'desc' }>({ key: null, direction: 'asc' });
 
@@ -450,12 +539,12 @@ export default function App() {
     setSortConfig({ key, direction });
   };
 
-  const filterSignature = `${maxResFilter}-${maxBitrateFilter}-${extFilter}-${statusFilter}-${fileNameFilter}`;
-  const filterContext = React.useRef({ signature: filterSignature, retained: new Set<number>() });
-
-  if (filterContext.current.signature !== filterSignature) {
-    filterContext.current = { signature: filterSignature, retained: new Set<number>() };
-  }
+  const getPriorityScore = (status: string) => {
+    if (status === 'verifying_upgrade') return 3;
+    if (status === 'magnet_found') return 2;
+    if (status === 'upgrading') return 1;
+    return 0;
+  };
 
   const filteredMovies = React.useMemo(() => {
     let result = movies.filter(m => {
@@ -470,36 +559,38 @@ export default function App() {
 
       if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) matches = false;
       if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) matches = false;
-      if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) matches = false;
       
-      if (statusFilter) {
-        if (statusFilter === 'matched') {
-           if (m.status !== 'indexed' || !m.imdbId) matches = false;
-        } else if (statusFilter === 'indexed') {
-           if (m.status !== 'indexed' || m.imdbId) matches = false;
-        } else {
-           if (m.status !== statusFilter) matches = false;
+      if (extFilter && extFilter.length > 0) {
+        const ext = getFileExtension(m);
+        if (!extFilter.includes(ext)) matches = false;
+      }
+      
+      if (statusFilter && statusFilter.length > 0) {
+        let statusMatches = false;
+        for (const sf of statusFilter) {
+          if (sf === 'matched') {
+            if (m.status === 'indexed' && m.imdbId) statusMatches = true;
+          } else if (sf === 'indexed') {
+            if (m.status === 'indexed' && !m.imdbId) statusMatches = true;
+          } else {
+            if (m.status === sf) statusMatches = true;
+          }
         }
+        if (!statusMatches) matches = false;
       }
 
-      if (matches) {
-         filterContext.current.retained.add(m.id);
-         return true;
-      }
-
-      if (filterContext.current.retained.has(m.id)) {
-         if (['upgrading', 'paused', 'verifying_upgrade'].includes(m.status)) {
-             return true;
-         } else {
-             filterContext.current.retained.delete(m.id);
-         }
-      }
-
-      return false;
+      return matches;
     });
 
-    if (sortConfig.key) {
-      result.sort((a, b) => {
+    result.sort((a, b) => {
+      const priorityA = getPriorityScore(a.status);
+      const priorityB = getPriorityScore(b.status);
+      
+      if (priorityA !== priorityB) {
+        return priorityB - priorityA;
+      }
+
+      if (sortConfig.key) {
         const aVal = a[sortConfig.key!];
         const bVal = b[sortConfig.key!];
         
@@ -512,9 +603,10 @@ export default function App() {
         if (aVal > bVal) {
           return sortConfig.direction === 'asc' ? 1 : -1;
         }
-        return 0;
-      });
-    }
+      }
+      return 0;
+    });
+
     return result;
   }, [movies, maxResFilter, maxBitrateFilter, extFilter, statusFilter, sortConfig, fileNameFilter]);
 
@@ -527,7 +619,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 font-sans p-4 md:p-6 transition-colors duration-300">
-      <header className="mb-6 md:mb-8 border-b border-slate-200 dark:border-slate-800 pb-6">
+      <header className="mb-6 md:mb-8 border-b border-slate-200 dark:border-slate-800 pb-6 relative z-50">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-600 dark:text-indigo-400">
@@ -598,7 +690,7 @@ export default function App() {
         </div>
         
         {/* Filters */}
-        <div className="mt-4 sm:mt-6 bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800/80 rounded-xl shadow-sm overflow-hidden transition-all duration-300">
+        <div className="mt-4 sm:mt-6 bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800/80 rounded-xl shadow-sm transition-all duration-300 relative z-50">
           <div className="p-1 sm:p-2 flex flex-col lg:flex-row lg:items-center gap-1 sm:gap-2">
             
             <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0">
@@ -631,32 +723,29 @@ export default function App() {
                 <option value="7680x4320">8K</option>
               </select>
               
-              <select 
-                className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all cursor-pointer hover:border-slate-300 dark:hover:border-slate-700"
-                value={extFilter}
-                onChange={(e) => setExtFilter(e.target.value)}
-              >
-                <option value="">Ext: All</option>
-                <option value=".mp4">.mp4</option>
-                <option value=".mkv">.mkv</option>
-                <option value=".avi">.avi</option>
-                <option value=".webm">.webm</option>
-              </select>
-
-              <select 
-                className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-700 dark:text-slate-300 transition-all cursor-pointer hover:border-slate-300 dark:hover:border-slate-700 col-span-2 md:col-span-1"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-              >
-                <option value="">Status: All</option>
-                <option value="fetching_metadata">Fetching Metadata</option>
-                <option value="indexed">Indexed (Unmatched)</option>
-                <option value="matched">Matched</option>
-                <option value="magnet_found">Ready to Upgrade</option>
-                <option value="upgrading">Upgrading</option>
-                <option value="paused">Paused</option>
-                <option value="verifying_upgrade">Verifying Upgrade</option>
-              </select>
+              <MultiSelectDropdown 
+                label="Ext"
+                options={uniqueExtensions}
+                selected={extFilter}
+                onChange={setExtFilter}
+                className="col-span-1"
+              />
+              
+              <MultiSelectDropdown 
+                label="Status"
+                options={[
+                  { value: "fetching_metadata", label: "Fetching Metadata" },
+                  { value: "indexed", label: "Indexed (Unmatched)" },
+                  { value: "matched", label: "Matched" },
+                  { value: "magnet_found", label: "Ready to Upgrade" },
+                  { value: "upgrading", label: "Upgrading" },
+                  { value: "paused", label: "Paused" },
+                  { value: "verifying_upgrade", label: "Awaiting Verification" }
+                ]}
+                selected={statusFilter}
+                onChange={setStatusFilter}
+                className="col-span-2 md:col-span-1 min-w-[130px]"
+              />
               
               <div className="flex flex-col gap-1 px-4 py-2 bg-slate-50/50 dark:bg-slate-950/30 rounded-lg border border-slate-200/50 dark:border-slate-800/50 col-span-2 md:col-span-3 lg:col-auto lg:flex-1 lg:min-w-[200px]">
                 <div className="flex items-center justify-between gap-4">
@@ -676,12 +765,12 @@ export default function App() {
                 />
               </div>
               
-              {(maxResFilter || extFilter || statusFilter || maxBitrateFilter || fileNameFilter) && (
+              {(maxResFilter || extFilter.length > 0 || statusFilter.length > 0 || maxBitrateFilter || fileNameFilter) && (
                 <button 
                   onClick={() => {
                     setMaxResFilter('');
-                    setExtFilter('');
-                    setStatusFilter('');
+                    setExtFilter([]);
+                    setStatusFilter([]);
                     setMaxBitrateFilter('');
                     setFileNameFilter('');
                   }}
@@ -1341,7 +1430,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="space-y-1">
-                  {logs.map((log, i) => {
+                  {[...logs].reverse().map((log, i) => {
                     const isError = log.includes('[ERROR]');
                     const isWarn = log.includes('[WARN]');
                     return (
@@ -1431,7 +1520,7 @@ function StatusBadge({ movie, onCancel, onPause, onResume }: { movie: Movie, onC
         </div>
       );
     case 'verifying_upgrade':
-      return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 flex w-max items-center gap-1.5 uppercase font-bold tracking-widest animate-pulse">Verifying</span>;
+      return <span className="text-[10px] sm:text-xs px-2 py-1 rounded-full bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 flex w-max items-center gap-1.5 uppercase font-bold tracking-widest animate-pulse">Awaiting Verification</span>;
     default:
       return <span className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-transparent uppercase tracking-wider font-semibold text-[10px]">{movie.status}</span>;
   }

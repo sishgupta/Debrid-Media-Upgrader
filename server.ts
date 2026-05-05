@@ -23,9 +23,17 @@ try {
   }
 } catch (e) {}
 
+// eslint-disable-next-line no-control-regex
+const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+
+function stripAnsi(str: string) {
+  return str.replace(ansiRegex, '');
+}
+
 function logToBuffer(level: string, message: string) {
   const timestamp = new Date().toISOString();
-  const entry = `[${timestamp}] [${level}] ${message}`;
+  const cleanMessage = stripAnsi(message);
+  const entry = `[${timestamp}] [${level}] ${cleanMessage}`;
   LOGS.push(entry);
   if (LOGS.length > MAX_LOGS) LOGS.shift();
   try {
@@ -1650,6 +1658,7 @@ async function startServer() {
     viteServer = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
+      clearScreen: false,
     });
     app.use(viteServer.middlewares);
   } else {
