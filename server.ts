@@ -991,8 +991,15 @@ async function startServer() {
       }
       const files = fs.readdirSync(mediaDir);
 
-      // Cleanup files that no longer exist
-      const existingFullPaths = files.map(f => path.join(mediaDir, f));
+      // Cleanup files that no longer exist, and ignore non-video files
+      const ignoreExts = ['.srt', '.sub', '.ass', '.vtt', '.idx', '.db', '.jpg', '.jpeg', '.png', '.ini', '.url', '.nfo', '.txt'];
+      const existingFullPaths = files
+        .filter(f => {
+          const lowerF = f.toLowerCase();
+          return !ignoreExts.some(ext => lowerF.endsWith(ext)) && lowerF !== '.ds_store';
+        })
+        .map(f => path.join(mediaDir, f));
+        
       db = db.filter(m => existingFullPaths.includes(m.filePath));
 
       let newCount = 0;
@@ -1004,10 +1011,10 @@ async function startServer() {
         const stat = fs.statSync(filePath);
         if (!stat.isFile()) continue;
 
-        // SKIP SUBTITLES
+        // SKIP SUBTITLES AND SYSTEM FILES
         const lowerFile = file.toLowerCase();
-        const subExts = ['.srt', '.sub', '.ass', '.vtt', '.idx'];
-        if (subExts.some(ext => lowerFile.endsWith(ext))) {
+        const ignoreExts = ['.srt', '.sub', '.ass', '.vtt', '.idx', '.db', '.jpg', '.jpeg', '.png', '.ini', '.url', '.nfo', '.txt'];
+        if (ignoreExts.some(ext => lowerFile.endsWith(ext)) || lowerFile === '.ds_store') {
           continue;
         }
 

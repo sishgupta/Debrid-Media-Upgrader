@@ -541,8 +541,8 @@ export default function App() {
 
   const getPriorityScore = (status: string) => {
     if (status === 'verifying_upgrade') return 3;
-    if (status === 'magnet_found') return 2;
-    if (status === 'upgrading') return 1;
+    if (status === 'upgrading') return 2;
+    if (status === 'magnet_found') return 1;
     return 0;
   };
 
