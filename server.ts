@@ -1534,6 +1534,7 @@ async function startServer() {
         
         movie.filePath = finalOldPath;
         movie.fileName = path.basename(finalOldPath);
+        movie.ext = path.extname(finalOldPath);
         
         // Restore meta
         if (movie.oldMeta) {

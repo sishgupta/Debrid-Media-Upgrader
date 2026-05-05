@@ -450,33 +450,52 @@ export default function App() {
     setSortConfig({ key, direction });
   };
 
+  const filterSignature = `${maxResFilter}-${maxBitrateFilter}-${extFilter}-${statusFilter}-${fileNameFilter}`;
+  const filterContext = React.useRef({ signature: filterSignature, retained: new Set<number>() });
+
+  if (filterContext.current.signature !== filterSignature) {
+    filterContext.current = { signature: filterSignature, retained: new Set<number>() };
+  }
+
   const filteredMovies = React.useMemo(() => {
     let result = movies.filter(m => {
+      let matches = true;
       // Text search should be primary filter
       if (fileNameFilter) {
         const search = fileNameFilter.toLowerCase();
         const matchesName = m.movieName?.toLowerCase().includes(search);
         const matchesFile = m.fileName?.toLowerCase().includes(search);
-        if (!matchesName && !matchesFile) return false;
+        if (!matchesName && !matchesFile) matches = false;
       }
 
-      // Keep movies that are currently being upgraded or verifying always visible (within the search results)
-      if (['upgrading', 'paused', 'verifying_upgrade'].includes(m.status)) return true;
-
-      if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) return false;
-      if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) return false;
-      if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) return false;
+      if (maxResFilter && parseRes(m.resolution) > parseRes(maxResFilter)) matches = false;
+      if (maxBitrateFilter && m.bitrate > parseInt(maxBitrateFilter)) matches = false;
+      if (extFilter && !m.ext.toLowerCase().includes(extFilter.toLowerCase())) matches = false;
       
       if (statusFilter) {
         if (statusFilter === 'matched') {
-           if (m.status !== 'indexed' || !m.imdbId) return false;
+           if (m.status !== 'indexed' || !m.imdbId) matches = false;
         } else if (statusFilter === 'indexed') {
-           if (m.status !== 'indexed' || m.imdbId) return false;
+           if (m.status !== 'indexed' || m.imdbId) matches = false;
         } else {
-           if (m.status !== statusFilter) return false;
+           if (m.status !== statusFilter) matches = false;
         }
       }
-      return true;
+
+      if (matches) {
+         filterContext.current.retained.add(m.id);
+         return true;
+      }
+
+      if (filterContext.current.retained.has(m.id)) {
+         if (['upgrading', 'paused', 'verifying_upgrade'].includes(m.status)) {
+             return true;
+         } else {
+             filterContext.current.retained.delete(m.id);
+         }
+      }
+
+      return false;
     });
 
     if (sortConfig.key) {
